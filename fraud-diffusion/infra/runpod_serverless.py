@@ -56,6 +56,11 @@ def build_and_push_image(tag: str = "latest") -> str:
 def deploy(tag: str = "latest", gpu_ids: str = "NVIDIA GeForce RTX 4090") -> str:
     """Create (or recreate) the RunPod Template + Serverless Endpoint for our image.
 
+    The GHCR package is private (inherited from the private GitHub repo — confirmed via
+    the GitHub API: anonymous pull gets 403), so RunPod needs registry credentials to pull
+    it. We register those via create_container_registry_auth and reference the returned id
+    in the template, rather than relying on public pull.
+
     Kaggle credentials: pass them as plain env here (pulled from local Keychain via
     load_secrets.sh, never written to disk in the image) for a first working version.
     RunPod also supports referencing console-managed Secrets from a template's env vars
@@ -64,11 +69,19 @@ def deploy(tag: str = "latest", gpu_ids: str = "NVIDIA GeForce RTX 4090") -> str
     """
     image_ref = _image_ref(tag)
 
+    registry_auth = runpod.create_container_registry_auth(
+        name=f"ghcr-{os.environ['GITHUB_USERNAME']}",
+        username=os.environ["GITHUB_USERNAME"],
+        password=os.environ["GHCR_TOKEN"],
+    )
+    print("Registry auth:", registry_auth)
+
     template = runpod.create_template(
         name=f"{TEMPLATE_NAME}-{int(time.time())}",
         image_name=image_ref,
         is_serverless=True,
         container_disk_in_gb=20,
+        registry_auth_id=registry_auth["id"],
         env={
             "KAGGLE_USERNAME": os.environ.get("KAGGLE_USERNAME", ""),
             "KAGGLE_KEY": os.environ.get("KAGGLE_KEY", ""),
