@@ -74,7 +74,7 @@ def deploy(tag: str = "latest", gpu_ids: str = "ADA_24") -> str:
     image_ref = _image_ref(tag)
 
     registry_auth = runpod.create_container_registry_auth(
-        name=f"ghcr-{os.environ['GITHUB_USERNAME']}",
+        name=f"ghcr-{os.environ['GITHUB_USERNAME']}-{int(time.time())}",  # unique: names collide
         username=os.environ["GITHUB_USERNAME"],
         password=os.environ["GHCR_TOKEN"],
     )
