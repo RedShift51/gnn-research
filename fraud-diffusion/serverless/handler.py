@@ -31,6 +31,12 @@ from training.train_gnn import run_from_config as train_run
 
 def handler(job):
     job_input = job.get("input", {})
+    # Print the raw job input FIRST, before any resolution/defaulting logic runs — this is the
+    # earliest possible point to catch a wrong/stale-worker misconfiguration (see LAB_JOURNAL.md's
+    # caught 40%-oversample incident, where a stale worker silently ignored config_dict and ran a
+    # completely different experiment with no error).
+    print(f"Received job_input: {job_input}")
+
     config_dict = job_input.get("config_dict")
     do_preprocess = job_input.get("preprocess", True)
 
@@ -43,6 +49,9 @@ def handler(job):
         config_path = job_input.get("config", "configs/paysim.yaml")
         config = load_config(config_path)
         config_label = config_path
+
+    print(f"Resolved config_label: {config_label}")
+    print(f"Resolved config: {config}")
 
     if do_preprocess:
         # The image ships no dataset (.dockerignore excludes data/raw/) — download it into the

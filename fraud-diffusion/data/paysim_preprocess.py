@@ -127,6 +127,11 @@ def temporal_split_masks(n: int, train_frac: float, val_frac: float) -> tuple:
 def run_from_config(config: dict) -> Path:
     """Run the full preprocess pipeline for an already-loaded config, return the output path.
     Reused by the CLI entrypoint (main, below) and by runpod/handler.py for serverless invocation."""
+    # See training/train_gnn.py's matching print — visibility into what's actually running at
+    # every stage, not just at train time, in case preprocessing itself picks up a stale/wrong
+    # config (e.g. a stale worker's git checkout missing a newly-added data.subsample_size value).
+    print(f"paysim_preprocess config: {config}")
+
     data_cfg = config["data"]
     seed = config["seed"]
 
