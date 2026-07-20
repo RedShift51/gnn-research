@@ -12,9 +12,14 @@ sys.path when run as `-m serverless.handler`), breaking `import runpod` on itsel
 
 Job input shape (see infra/runpod_serverless.py for how jobs are submitted):
     {
-        "config": "configs/paysim.yaml",   # path baked into the image
+        "config": "configs/paysim.yaml",   # path baked into the image, OR
+        "config_dict": {...},               # a full config dict inline — no image rebuild needed
+                                             # to try new hyperparameters, just change the payload
         "preprocess": true                  # rebuild the graph, or reuse an existing processed_path
     }
+Exactly one of "config"/"config_dict" should be set. "config" still exists for configs that are
+genuinely part of the repo (checked in, reused across runs); "config_dict" is for one-off sweeps
+where committing a new YAML file just to trigger a rebuild would be pure overhead.
 """
 
 import runpod
@@ -26,10 +31,18 @@ from training.train_gnn import run_from_config as train_run
 
 def handler(job):
     job_input = job.get("input", {})
-    config_path = job_input.get("config", "configs/paysim.yaml")
+    config_dict = job_input.get("config_dict")
     do_preprocess = job_input.get("preprocess", True)
 
-    config = load_config(config_path)
+    if config_dict is not None:
+        config = config_dict
+        # config_path is only used for the journal's "config=" label — there's no real file for
+        # an inline config, so label it with the run_name instead of the misleading default path.
+        config_label = f"inline:{config.get('journal', {}).get('run_name', 'unnamed')}"
+    else:
+        config_path = job_input.get("config", "configs/paysim.yaml")
+        config = load_config(config_path)
+        config_label = config_path
 
     if do_preprocess:
         # The image ships no dataset (.dockerignore excludes data/raw/) — download it into the
@@ -38,7 +51,7 @@ def handler(job):
         ensure_downloaded()
         preprocess_run(config)
 
-    return train_run(config, config_path)
+    return train_run(config, config_label)
 
 
 runpod.serverless.start({"handler": handler})

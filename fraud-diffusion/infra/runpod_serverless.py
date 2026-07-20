@@ -17,15 +17,33 @@ Usage (run from the fraud-diffusion/ project root, after `source infra/load_secr
 """
 
 import argparse
+import copy
 import os
 import subprocess
 import time
 
 import runpod
+import yaml
 
 IMAGE_NAME = "fraud-diffusion-serverless"
 TEMPLATE_NAME = "fraud-diffusion-serverless"
 ENDPOINT_NAME = "fraud-diffusion-serverless"
+
+
+def sweep_config(base_config_path: str, run_name: str, **overrides) -> dict:
+    """Load a base config (e.g. configs/paysim_full_gat.yaml) and apply nested-dict overrides,
+    for one-off hyperparameter sweeps via invoke()'s config_dict — no new YAML file, no image
+    rebuild. E.g.:
+        sweep_config("configs/paysim_full_gat.yaml", "gat_oversample_0.05",
+                     train={"oversample_fraud_frac": 0.05})
+    """
+    with open(base_config_path) as f:
+        config = yaml.safe_load(f)
+    config = copy.deepcopy(config)
+    for section, values in overrides.items():
+        config.setdefault(section, {}).update(values)
+    config.setdefault("journal", {})["run_name"] = run_name
+    return config
 
 
 def _image_ref(tag: str = "latest") -> str:
