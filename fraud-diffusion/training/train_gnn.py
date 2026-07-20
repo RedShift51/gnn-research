@@ -305,7 +305,21 @@ def run_from_config(config: dict, config_path: str) -> dict:
         epoch_stopped=best_epoch, val_metrics=val_metrics, test_metrics=test_metrics,
     )
 
-    return {"val": val_metrics, "test": test_metrics, "best_epoch": best_epoch, "device": str(device)}
+    # Included so a job's result can be sanity-checked from the returned output alone (e.g. via
+    # the RunPod status API after the fact) without needing to have watched live logs — a stale
+    # worker silently running the wrong config is otherwise invisible in unattended/overnight runs.
+    config_summary = {
+        "config_label": config_path,
+        "model_name": config["model"]["name"],
+        "mini_batch": mini_batch,
+        "oversample_fraud_frac": config["train"].get("oversample_fraud_frac", 0.0),
+        "epochs_cap": config["train"]["epochs"],
+        "subsample_size": config["data"]["subsample_size"],
+    }
+    return {
+        "val": val_metrics, "test": test_metrics, "best_epoch": best_epoch, "device": str(device),
+        "config_summary": config_summary,
+    }
 
 
 def main() -> None:
