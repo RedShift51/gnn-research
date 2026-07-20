@@ -38,11 +38,11 @@ train:
   # (vs ~15M if left at batch_size=128 — caught and cancelled a run started with the wrong,
   # full-batch-calibrated epoch count before it burned serverless time on that). Recalibrated
   # epochs/patience/ema_start_epoch way down accordingly.
-  epochs: 30
-  patience: 5
+  epochs: 40
+  patience: 8
   device: auto
   ema_decay: 0.98
-  ema_start_epoch: 3
+  ema_start_epoch: 15
   mini_batch: true
   batch_size: 1024       # seed nodes per batch (their loss is what gets backpropagated)
   num_neighbors: [15, 10]  # sampled neighbors per hop, one entry per GNN layer (num_layers=2)

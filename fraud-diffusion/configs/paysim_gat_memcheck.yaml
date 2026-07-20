@@ -1,0 +1,38 @@
+seed: 42
+
+data:
+  raw_csv: data/raw/paysim.csv
+  processed_path: data/processed/paysim_graph_full.pt   # full graph — this IS the memory test
+  fraud_types: [TRANSFER, CASH_OUT]
+  subsample_size: 5000000
+  max_node_degree: 20
+  train_frac: 0.70
+  val_frac: 0.15
+  test_frac: 0.15
+
+model:
+  name: gat
+  hidden_dim: 64
+  num_layers: 2
+  heads: 8
+  dropout: 0.6
+
+loss:
+  name: focal
+  alpha: 0.25
+  gamma: 2.0
+
+train:
+  lr: 0.005
+  weight_decay: 0.0005
+  epochs: 1           # just 1 epoch (~1900 steps at batch_size=1024) to verify no OOM + timing
+  patience: 50
+  device: auto
+  ema_decay: 0.0      # disabled — this run is purely a memory/timing check, not a real result
+  mini_batch: true
+  batch_size: 1024
+  num_neighbors: [15, 10]
+
+journal:
+  path: LAB_JOURNAL.md
+  run_name: MEMCHECK_gat_minibatch_full_DELETE_ME
