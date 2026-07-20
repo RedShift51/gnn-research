@@ -174,6 +174,13 @@ def run_from_config(config: dict, config_path: str) -> dict:
     entrypoint (main, below) and by runpod/handler.py for serverless invocation."""
     set_seed(config["seed"])
 
+    # Print the actual config being used, in full, before anything else — a stale/warm serverless
+    # worker silently running the wrong config (e.g. defaulting away from an unrecognized
+    # config_dict key) is otherwise invisible until you notice the results look off. Cheap
+    # insurance against exactly that (see LAB_JOURNAL.md's caught 40%-oversample incident).
+    print(f"Config path/label: {config_path}")
+    print(f"Full config: {config}")
+
     device = pick_device(config["train"]["device"])
     print(f"Using device: {device}")
 
