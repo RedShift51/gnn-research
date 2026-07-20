@@ -35,7 +35,7 @@ train:
   epochs: 1000
   patience: 50
   device: auto
-  ema_decay: 0.999
+  ema_decay: 0.98
   ema_start_epoch: 30
 
 journal:

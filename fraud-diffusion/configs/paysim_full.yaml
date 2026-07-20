@@ -27,7 +27,7 @@ train:
   epochs: 1000
   patience: 50               # early stopping on val AUC-ROC
   device: auto               # auto | cpu | mps | cuda
-  ema_decay: 0.999           # 0 disables EMA
+  ema_decay: 0.98            # 0.999 was too slow to converge within budget (see LAB_JOURNAL Run 10)
   ema_start_epoch: 30        # warm up normally first, then snapshot weights and start averaging
 
 journal:
