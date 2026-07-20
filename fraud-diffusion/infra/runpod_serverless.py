@@ -98,7 +98,8 @@ def deploy(tag: str = "latest", gpu_ids: str = "ADA_24") -> str:
         template_id=template["id"],
         gpu_ids=gpu_ids,
         workers_min=0,      # scale-to-zero when idle
-        workers_max=5,      # several jobs can run concurrently on separate workers
+        workers_max=4,      # account quota is 5 total workers across all endpoints; the first
+                            # (now-stale) endpoint already reserved 1, leaving 4 for this one
         idle_timeout=30,
     )
     print("Endpoint:", endpoint)
