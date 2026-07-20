@@ -41,6 +41,6 @@ jobs:
           context: fraud-diffusion
           file: fraud-diffusion/serverless/Dockerfile
           push: true
-          tags: ghcr.io/${{ github.repository_owner }}/fraud-diffusion-serverless:latest
+          tags: ghcr.io/redshift51/fraud-diffusion-serverless:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
