@@ -270,8 +270,7 @@ def run_from_config(config: dict, config_path: str) -> dict:
         else:
             epochs_since_improve += 1
 
-        if epoch % 10 == 0 or epoch == 1:
-            print(f"Epoch {epoch:3d} | loss={loss:.4f} | val_auc_roc={val_metrics['auc_roc']:.4f} | val_f1_macro={val_metrics['f1_macro']:.4f}")
+        print(f"Epoch {epoch:3d} | loss={loss:.4f} | val_auc_roc={val_metrics['auc_roc']:.4f} | val_f1_macro={val_metrics['f1_macro']:.4f}")
 
         # Guard against stopping before EMA ever gets a chance to run: without this, a plateau in
         # the raw model right around ema_start_epoch (exactly what happened in LAB_JOURNAL Run 17
