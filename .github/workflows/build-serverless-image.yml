@@ -25,6 +25,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Free up runner disk space
+        # ubuntu-latest only has ~14GB free by default — not enough for a CUDA devel base image
+        # plus GHA cache export. This removes preinstalled toolchains we don't use (.NET,
+        # Android SDK, Haskell, etc.) to reclaim space before the build.
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune -a -f
+          df -h /
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
