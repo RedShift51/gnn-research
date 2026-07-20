@@ -14,7 +14,7 @@ model:
   name: graphsage
   hidden_dim: 128
   num_layers: 2
-  dropout: 0.3
+  dropout: 0.5               # standard GraphSAGE regularization value (Hamilton et al. 2017)
 
 loss:
   name: focal
@@ -27,6 +27,8 @@ train:
   epochs: 200
   patience: 20               # early stopping on val AUC-ROC
   device: auto               # auto | cpu | mps | cuda
+  ema_decay: 0.98            # 0 disables EMA
+  ema_start_epoch: 20        # warm up normally first, then snapshot weights and start averaging
 
 journal:
   path: LAB_JOURNAL.md

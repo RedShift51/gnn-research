@@ -11,6 +11,7 @@ import yaml
 from evaluation.metrics import compute_metrics
 from models.gnn.gat import GAT
 from models.gnn.graphsage import GraphSAGE
+from training.ema import EMA
 from training.losses import FocalLoss
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -115,6 +116,11 @@ def run_from_config(config: dict, config_path: str) -> dict:
 
     model = build_model(config, in_dim=data.x.shape[1]).to(device)
 
+    ema_decay = config["train"].get("ema_decay", 0.0)
+    ema_start_epoch = config["train"].get("ema_start_epoch", 20)
+    ema = None            # created lazily at ema_start_epoch, snapshotting the model then
+    eval_model = None      # reused each epoch to evaluate EMA weights without touching `model`
+
     criterion = FocalLoss(alpha=config["loss"]["alpha"], gamma=config["loss"]["gamma"])
     optimizer = torch.optim.Adam(
         model.parameters(),
@@ -140,10 +146,22 @@ def run_from_config(config: dict, config_path: str) -> dict:
         loss.backward()
         optimizer.step()
 
-        val_metrics = evaluate(model, data, data.val_mask, device)
+        if ema_decay > 0 and epoch == ema_start_epoch:
+            ema = EMA(model, decay=ema_decay)               # snapshot current (warmed-up) weights
+            eval_model = build_model(config, in_dim=data.x.shape[1]).to(device)
+        elif ema is not None:
+            ema.update(model)
+
+        if ema is not None:
+            eval_model.load_state_dict(ema.state_dict())
+            val_metrics = evaluate(eval_model, data, data.val_mask, device)
+        else:
+            val_metrics = evaluate(model, data, data.val_mask, device)
+
         if val_metrics["auc_roc"] > best_val_auc:
             best_val_auc = val_metrics["auc_roc"]
-            best_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
+            source = ema.state_dict() if ema is not None else model.state_dict()
+            best_state = {k: v.detach().clone() for k, v in source.items()}
             best_epoch = epoch
             epochs_since_improve = 0
         else:
