@@ -32,13 +32,19 @@ loss:
 train:
   lr: 0.005          # GAT papers typically use a higher lr than GraphSAGE
   weight_decay: 0.0005
-  epochs: 1000
-  patience: 50
+  # IMPORTANT: with mini_batch=true, one "epoch" is a full pass over ~1.94M train nodes in
+  # batches of `batch_size` — NOT one gradient step like the full-batch configs. At
+  # batch_size=1024 that's ~1900 steps/epoch, so epochs=1000 here would mean ~1.9M total steps
+  # (vs ~15M if left at batch_size=128 — caught and cancelled a run started with the wrong,
+  # full-batch-calibrated epoch count before it burned serverless time on that). Recalibrated
+  # epochs/patience/ema_start_epoch way down accordingly.
+  epochs: 30
+  patience: 5
   device: auto
   ema_decay: 0.98
-  ema_start_epoch: 30
+  ema_start_epoch: 3
   mini_batch: true
-  batch_size: 128        # seed nodes per batch (their loss is what gets backpropagated)
+  batch_size: 1024       # seed nodes per batch (their loss is what gets backpropagated)
   num_neighbors: [15, 10]  # sampled neighbors per hop, one entry per GNN layer (num_layers=2)
 
 journal:
