@@ -5,9 +5,11 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import torch.nn as nn
 import yaml
 
 from evaluation.metrics import compute_metrics
+from models.gnn.gat import GAT
 from models.gnn.graphsage import GraphSAGE
 from training.losses import FocalLoss
 
@@ -33,6 +35,28 @@ def pick_device(requested: str) -> torch.device:
     if torch.backends.mps.is_available():
         return torch.device("mps")
     return torch.device("cpu")
+
+
+def build_model(config: dict, in_dim: int) -> nn.Module:
+    mcfg = config["model"]
+    name = mcfg["name"]
+
+    if name == "graphsage":
+        return GraphSAGE(
+            in_dim=in_dim,
+            hidden_dim=mcfg["hidden_dim"],
+            num_layers=mcfg["num_layers"],
+            dropout=mcfg["dropout"],
+        )
+    if name == "gat":
+        return GAT(
+            in_dim=in_dim,
+            hidden_dim=mcfg["hidden_dim"],
+            num_layers=mcfg["num_layers"],
+            heads=mcfg.get("heads", 8),
+            dropout=mcfg["dropout"],
+        )
+    raise ValueError(f"Unknown model.name in config: {name!r} (expected 'graphsage' or 'gat')")
 
 
 def evaluate(model, data, mask, device) -> dict:
@@ -89,12 +113,7 @@ def run_from_config(config: dict, config_path: str) -> dict:
     data = torch.load(ROOT / config["data"]["processed_path"], weights_only=False)
     data = data.to(device)
 
-    model = GraphSAGE(
-        in_dim=data.x.shape[1],
-        hidden_dim=config["model"]["hidden_dim"],
-        num_layers=config["model"]["num_layers"],
-        dropout=config["model"]["dropout"],
-    ).to(device)
+    model = build_model(config, in_dim=data.x.shape[1]).to(device)
 
     criterion = FocalLoss(alpha=config["loss"]["alpha"], gamma=config["loss"]["gamma"])
     optimizer = torch.optim.Adam(

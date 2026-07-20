@@ -13,8 +13,8 @@ data:
 model:
   name: graphsage
   hidden_dim: 128
-  num_layers: 2
-  dropout: 0.3
+  num_layers: 2      # 2 is standard for GraphSAGE — deeper often oversmooths on these graphs
+  dropout: 0.5       # standard GraphSAGE/GAT regularization value (Hamilton et al. 2017)
 
 loss:
   name: focal
