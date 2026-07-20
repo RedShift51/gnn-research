@@ -6,6 +6,7 @@ __pycache__/
 
 fraud-diffusion/data/raw/
 fraud-diffusion/data/processed/
+fraud-diffusion/models/diffusion/*.pt
 fraud-diffusion/wandb/
 
 .DS_Store

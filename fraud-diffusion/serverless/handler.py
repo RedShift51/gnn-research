@@ -63,6 +63,19 @@ def handler(job):
         ensure_downloaded()
         preprocess_run(config)
 
+    if config.get("diffusion"):
+        # Train a TabDDPM on fraud-only TRAIN features, sample synthetic fraud nodes, and add
+        # them to the graph before GNN training. This is the actual diffusion-augmentation
+        # research contribution, not just another GNN baseline — see LAB_JOURNAL.md.
+        from data.augment_graph import run_from_config as augment_run
+        from training.train_diffusion import run_from_config as diffusion_train_run
+
+        print("config.diffusion present — training TabDDPM + augmenting graph before GNN training")
+        diffusion_train_run(config)
+        augment_run(config)
+        config["data"]["processed_path"] = config["data"]["augmented_processed_path"]
+        print(f"GNN training will use the augmented graph: {config['data']['processed_path']}")
+
     result = train_run(config, config_label)
     # In the returned output (not just logs) so a stale worker is detectable from the job status
     # API alone, even in the case where it ISN'T missing a file (e.g. only a few commits behind).
