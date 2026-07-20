@@ -23,6 +23,7 @@ where committing a new YAML file just to trigger a rebuild would be pure overhea
 """
 
 import os
+import subprocess
 
 import runpod
 
@@ -31,14 +32,33 @@ from data.paysim_preprocess import load_config, run_from_config as preprocess_ru
 from training.train_gnn import run_from_config as train_run
 
 
+def _git_pull_latest() -> str:
+    """Re-sync the repo checkout at the START of every job, not just once at container boot.
+    RunPod reuses the same long-lived worker process across many sequential jobs far more
+    eagerly than expected — entrypoint.sh's one-time git pull never runs again for that worker,
+    so it silently drifts behind (see LAB_JOURNAL.md: three different jobs in one night hit
+    FileNotFoundError for configs added hours earlier, on three different "warm" workers). This
+    fixes config-file staleness. It does NOT fix stale in-memory *code* — already-imported
+    Python modules aren't reloaded — but every failure so far has been a missing config file."""
+    try:
+        subprocess.run(["git", "-C", "/root/repo", "pull", "--ff-only"],
+                       check=True, capture_output=True, text=True, timeout=30)
+        return subprocess.run(["git", "-C", "/root/repo", "rev-parse", "HEAD"],
+                               check=True, capture_output=True, text=True).stdout.strip()
+    except Exception as e:
+        print(f"git pull at job start failed (continuing with existing checkout): {e}")
+        return os.environ.get("GIT_COMMIT_SHA", "unknown")
+
+
 def handler(job):
+    commit_sha = _git_pull_latest()
     job_input = job.get("input", {})
     # Print the raw job input FIRST, before any resolution/defaulting logic runs — this is the
     # earliest possible point to catch a wrong/stale-worker misconfiguration (see LAB_JOURNAL.md's
     # caught 40%-oversample incident, where a stale worker silently ignored config_dict and ran a
     # completely different experiment with no error).
     print(f"Received job_input: {job_input}")
-    print(f"Worker git commit: {os.environ.get('GIT_COMMIT_SHA', 'unknown')}")
+    print(f"Worker git commit (after per-job pull): {commit_sha}")
 
     config_dict = job_input.get("config_dict")
     do_preprocess = job_input.get("preprocess", True)
@@ -79,7 +99,7 @@ def handler(job):
     result = train_run(config, config_label)
     # In the returned output (not just logs) so a stale worker is detectable from the job status
     # API alone, even in the case where it ISN'T missing a file (e.g. only a few commits behind).
-    result["worker_git_commit"] = os.environ.get("GIT_COMMIT_SHA", "unknown")
+    result["worker_git_commit"] = commit_sha
     return result
 
 
