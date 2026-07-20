@@ -1,0 +1,43 @@
+name: Build and push serverless image
+
+# ubuntu-latest runners are native amd64 — the same architecture RunPod's GPU hosts run.
+# No QEMU/cross-compilation needed here, unlike building this image on an Apple Silicon Mac.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "fraud-diffusion/serverless/**"
+      - "fraud-diffusion/requirements.txt"
+      - "fraud-diffusion/data/**"
+      - "fraud-diffusion/models/**"
+      - "fraud-diffusion/training/**"
+      - "fraud-diffusion/evaluation/**"
+      - "fraud-diffusion/configs/**"
+      - ".github/workflows/build-serverless-image.yml"
+  workflow_dispatch: {}
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: fraud-diffusion
+          file: fraud-diffusion/serverless/Dockerfile
+          push: true
+          tags: ghcr.io/${{ github.repository_owner }}/fraud-diffusion-serverless:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

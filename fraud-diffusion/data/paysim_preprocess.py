@@ -53,16 +53,11 @@ def build_node_features(df: pd.DataFrame) -> np.ndarray:
     orig_zeroed = ((df["oldbalanceOrg"] > 0) & (df["newbalanceOrig"] == 0)).to_numpy(dtype=np.float32)
     dest_was_zero = (df["oldbalanceDest"] == 0).to_numpy(dtype=np.float32)
 
-    # PaySim's near-deterministic fraud signature: the origin account is drained by exactly the
-    # transaction amount (oldbalanceOrg == amount, newbalanceOrig == 0). Trees pick this up as a
-    # crisp threshold rule; a smooth GNN embedding of the continuous balance deltas above may not
-    # isolate it as sharply, so we also encode it directly as a boolean.
-    eps = 0.01
-    is_exact_drain = (
-        (np.abs(df["oldbalanceOrg"] - df["amount"]) < eps)
-        & (df["newbalanceOrig"].abs() < eps)
-        & (df["oldbalanceOrg"] > 0)
-    ).to_numpy(dtype=np.float32)
+    # NOTE: deliberately NOT including an exact "oldbalanceOrg == amount AND newbalanceOrig == 0"
+    # feature here. It correlates ~0.99 with isFraud in PaySim (a known simulator artifact, not a
+    # generalizable fraud pattern — see LAB_JOURNAL.md Run 5) and makes any model trivially "solve"
+    # this dataset without learning anything transferable. If you want to study that artifact
+    # deliberately, add it in a separately-named ablation config, never in this default path.
 
     hour_of_day = (df["step"] % 24).to_numpy(dtype=np.float32)
     is_night = ((hour_of_day < 6) | (hour_of_day > 22)).astype(np.float32)
@@ -79,7 +74,6 @@ def build_node_features(df: pd.DataFrame) -> np.ndarray:
             delta_dest.to_numpy(dtype=np.float32),
             orig_zeroed,
             dest_was_zero,
-            is_exact_drain,
             hour_of_day,
             is_night,
         ],
