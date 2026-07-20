@@ -102,7 +102,11 @@ def build_edges(df: pd.DataFrame, max_node_degree: int) -> np.ndarray:
     edge_arr = np.array(sorted(edges), dtype=np.int64).T  # [2, E], directed forward-in-time
     # Make undirected for message passing.
     edge_arr = np.concatenate([edge_arr, edge_arr[::-1]], axis=1)
-    return edge_arr
+    # .T followed by concatenate leaves this non-contiguous (confirmed: both steps individually
+    # produce non-contiguous arrays here) — fine for full-batch training, but pyg-lib's CSC
+    # sampler for NeighborLoader requires a contiguous edge_index and fails with a bare
+    # "Input should be contiguous" otherwise.
+    return np.ascontiguousarray(edge_arr)
 
 
 def temporal_split_masks(n: int, train_frac: float, val_frac: float) -> tuple:
