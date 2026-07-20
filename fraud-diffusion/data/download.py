@@ -25,23 +25,21 @@ Or download manually:
 """
 
 
-def main() -> None:
+def ensure_downloaded() -> Path:
+    """Download PaySim if not already present, return the CSV path. Raises RuntimeError on
+    failure (never sys.exit) — reused by serverless/handler.py, where killing the whole worker
+    process on a per-job error would be wrong. See main() below for the CLI entrypoint."""
     RAW_DIR.mkdir(parents=True, exist_ok=True)
 
     if TARGET_CSV.exists():
         print(f"Already present: {TARGET_CSV}")
-        return
+        return TARGET_CSV
 
     kaggle_creds = Path.home() / ".kaggle" / "kaggle.json"
     if not kaggle_creds.exists():
-        print(MANUAL_INSTRUCTIONS)
-        sys.exit(1)
+        raise RuntimeError(MANUAL_INSTRUCTIONS)
 
-    try:
-        from kaggle.api.kaggle_api_extended import KaggleApi
-    except ImportError:
-        print("`kaggle` package not installed. Run: pip install kaggle")
-        sys.exit(1)
+    from kaggle.api.kaggle_api_extended import KaggleApi
 
     api = KaggleApi()
     api.authenticate()
@@ -50,13 +48,21 @@ def main() -> None:
 
     csvs = list(RAW_DIR.glob("*.csv"))
     if not csvs:
-        print("Download finished but no CSV found in data/raw/.")
-        sys.exit(1)
+        raise RuntimeError("Download finished but no CSV found in data/raw/.")
 
     if csvs[0] != TARGET_CSV:
         shutil.move(str(csvs[0]), str(TARGET_CSV))
 
     print(f"Saved: {TARGET_CSV}")
+    return TARGET_CSV
+
+
+def main() -> None:
+    try:
+        ensure_downloaded()
+    except RuntimeError as e:
+        print(e)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

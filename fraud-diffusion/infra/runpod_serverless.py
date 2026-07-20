@@ -53,8 +53,12 @@ def build_and_push_image(tag: str = "latest") -> str:
     return image_ref
 
 
-def deploy(tag: str = "latest", gpu_ids: str = "NVIDIA GeForce RTX 4090") -> str:
+def deploy(tag: str = "latest", gpu_ids: str = "ADA_24") -> str:
     """Create (or recreate) the RunPod Template + Serverless Endpoint for our image.
+
+    gpu_ids is a comma-separated list of RunPod GPU *pool* IDs, not a literal GPU name — e.g.
+    "ADA_24" (RTX 4090 class, 24GB Ada Lovelace), not "NVIDIA GeForce RTX 4090". See
+    https://docs.runpod.io/references/gpu-types#gpu-pools for the full list.
 
     The GHCR package is private (inherited from the private GitHub repo — confirmed via
     the GitHub API: anonymous pull gets 403), so RunPod needs registry credentials to pull

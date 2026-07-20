@@ -19,6 +19,7 @@ Job input shape (see infra/runpod_serverless.py for how jobs are submitted):
 
 import runpod
 
+from data.download import ensure_downloaded
 from data.paysim_preprocess import load_config, run_from_config as preprocess_run
 from training.train_gnn import run_from_config as train_run
 
@@ -31,6 +32,10 @@ def handler(job):
     config = load_config(config_path)
 
     if do_preprocess:
+        # The image ships no dataset (.dockerignore excludes data/raw/) — download it into the
+        # container on first use. entrypoint.sh already wrote ~/.kaggle/kaggle.json from the
+        # KAGGLE_USERNAME/KAGGLE_KEY env vars (RunPod Secrets or template env) before this runs.
+        ensure_downloaded()
         preprocess_run(config)
 
     return train_run(config, config_path)

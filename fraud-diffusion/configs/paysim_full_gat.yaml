@@ -12,9 +12,16 @@ data:
 
 model:
   name: gat
-  hidden_dim: 64     # GAT concatenates heads, so effective width = hidden_dim * heads
+  # Full-batch GAT materializes per-edge, per-head attention features: on this graph
+  # (28.3M directed edges) the standard hidden_dim=64/heads=8 (effective concat width 512)
+  # tried to allocate ~59GB and OOM'd on a 24GB RTX 4090. GraphSAGE only aggregates
+  # (sum/mean), so it doesn't hit this — attention is inherently pricier per edge.
+  # Cut to hidden_dim=32/heads=4 (concat width 128, ~4x less) to fit; the real long-term
+  # fix for scaling GAT further is neighbor-sampled mini-batch training (PyG NeighborLoader)
+  # instead of full-batch, not just shrinking the model.
+  hidden_dim: 32
   num_layers: 2
-  heads: 8           # standard GAT default (Velickovic et al. 2018)
+  heads: 4
   dropout: 0.6       # standard GAT regularization value (higher than GraphSAGE's 0.5)
 
 loss:
