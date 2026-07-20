@@ -46,6 +46,11 @@ train:
   mini_batch: true
   batch_size: 1024       # seed nodes per batch (their loss is what gets backpropagated)
   num_neighbors: [15, 10]  # sampled neighbors per hop, one entry per GNN layer (num_layers=2)
+  # Run 17 (LAB_JOURNAL) plateaued at raw-model AUC~0.84 with F1/G-mean at the trivial-negative
+  # level — per-batch fraud signal is much sparser here than full-batch (~2 fraud/batch of 1024
+  # vs all 3643 every full-batch step). Oversample fraud seed nodes so ~15% of each training
+  # epoch's node pool is fraud; val/test loaders are untouched, so evaluation stays honest.
+  oversample_fraud_frac: 0.15
 
 journal:
   path: LAB_JOURNAL.md

@@ -61,6 +61,30 @@ def build_model(config: dict, in_dim: int) -> nn.Module:
     raise ValueError(f"Unknown model.name in config: {name!r} (expected 'graphsage' or 'gat')")
 
 
+def build_oversampled_input_nodes(data, mask, target_fraud_frac: float, seed: int) -> torch.Tensor:
+    """Repeat fraud node indices so they make up `target_fraud_frac` of the training seed-node
+    pool NeighborLoader draws batches from. Mini-batch training sees far sparser fraud signal per
+    step than full-batch (e.g. ~2 fraud nodes per batch of 1024 out of 3643 total train-fraud on
+    the full PaySim graph) — oversampling the seeds directly, rather than only tuning EMA/patience
+    around it, addresses that at the source. Only used for the TRAIN loader; val/test keep the
+    true distribution so evaluation stays honest."""
+    idx = mask.nonzero(as_tuple=True)[0]
+    y = data.y[idx]
+    fraud_idx = idx[y == 1]
+    legit_idx = idx[y == 0]
+    if fraud_idx.numel() == 0:
+        return idx
+
+    repeats = max(1, round((target_fraud_frac * legit_idx.numel())
+                           / ((1 - target_fraud_frac) * fraud_idx.numel())))
+    oversampled_fraud = fraud_idx.repeat(repeats)
+    combined = torch.cat([oversampled_fraud, legit_idx])
+
+    generator = torch.Generator().manual_seed(seed)
+    perm = torch.randperm(combined.numel(), generator=generator)
+    return combined[perm]
+
+
 def evaluate(model, data, mask, device) -> dict:
     """Full-batch evaluation: one forward pass over the whole graph."""
     model.eval()
@@ -163,9 +187,18 @@ def run_from_config(config: dict, config_path: str) -> dict:
         # even at hidden_dim=32/heads=4 in full-batch mode on both 24GB and 48GB GPUs).
         num_neighbors = config["train"]["num_neighbors"]
         batch_size = config["train"]["batch_size"]
+
+        oversample_frac = config["train"].get("oversample_fraud_frac", 0.0)
+        if oversample_frac > 0:
+            train_input_nodes = build_oversampled_input_nodes(
+                data, data.train_mask, oversample_frac, config["seed"]
+            )
+        else:
+            train_input_nodes = data.train_mask
+
         train_loader = NeighborLoader(
             data, num_neighbors=num_neighbors, batch_size=batch_size,
-            input_nodes=data.train_mask, shuffle=True,
+            input_nodes=train_input_nodes, shuffle=True,
         )
         val_loader = NeighborLoader(
             data, num_neighbors=num_neighbors, batch_size=batch_size,
@@ -240,7 +273,11 @@ def run_from_config(config: dict, config_path: str) -> dict:
         if epoch % 10 == 0 or epoch == 1:
             print(f"Epoch {epoch:3d} | loss={loss:.4f} | val_auc_roc={val_metrics['auc_roc']:.4f} | val_f1_macro={val_metrics['f1_macro']:.4f}")
 
-        if epochs_since_improve >= patience:
+        # Guard against stopping before EMA ever gets a chance to run: without this, a plateau in
+        # the raw model right around ema_start_epoch (exactly what happened in LAB_JOURNAL Run 17
+        # — best_epoch=7, ema_start_epoch=15, patience=8) fires early stopping before EMA engages
+        # even once, so every "evaluated" checkpoint that whole run was the raw model.
+        if epochs_since_improve >= patience and (ema_decay <= 0 or epoch > ema_start_epoch):
             print(f"Early stopping at epoch {epoch} (best epoch {best_epoch})")
             break
 
