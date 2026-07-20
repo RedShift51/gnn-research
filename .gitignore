@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+.env
+*.egg-info/
+
+fraud-diffusion/data/raw/
+fraud-diffusion/data/processed/
+fraud-diffusion/wandb/
+
+.DS_Store

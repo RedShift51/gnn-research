@@ -1,0 +1,8 @@
+torch>=2.2
+torch-geometric>=2.5
+pandas>=2.0
+numpy>=1.26
+scikit-learn>=1.4
+pyyaml>=6.0
+kaggle>=1.6
+runpod>=1.7

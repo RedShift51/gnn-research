@@ -1,0 +1,33 @@
+seed: 42
+
+data:
+  raw_csv: data/raw/paysim.csv
+  processed_path: data/processed/paysim_graph_full.pt
+  fraud_types: [TRANSFER, CASH_OUT]
+  subsample_size: 5000000    # larger than the ~2.77M TRANSFER+CASH_OUT rows -> keeps everything
+  max_node_degree: 20
+  train_frac: 0.70
+  val_frac: 0.15
+  test_frac: 0.15
+
+model:
+  name: graphsage
+  hidden_dim: 128
+  num_layers: 2
+  dropout: 0.3
+
+loss:
+  name: focal
+  alpha: 0.25
+  gamma: 2.0
+
+train:
+  lr: 0.001
+  weight_decay: 0.00001
+  epochs: 1000
+  patience: 50               # early stopping on val AUC-ROC
+  device: auto               # auto | cpu | mps | cuda
+
+journal:
+  path: LAB_JOURNAL.md
+  run_name: full_graphsage_paysim_runpod_4090
