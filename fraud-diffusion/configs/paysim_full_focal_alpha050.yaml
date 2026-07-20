@@ -1,0 +1,35 @@
+seed: 42
+
+data:
+  raw_csv: data/raw/paysim.csv
+  processed_path: data/processed/paysim_graph_full.pt
+  fraud_types: [TRANSFER, CASH_OUT]
+  subsample_size: 5000000
+  max_node_degree: 20
+  train_frac: 0.70
+  val_frac: 0.15
+  test_frac: 0.15
+
+model:
+  name: graphsage
+  hidden_dim: 128
+  num_layers: 2
+  dropout: 0.5
+
+loss:
+  name: focal
+  alpha: 0.50   # intermediate point between Run 11's baseline (0.25) and the 0.75 sweep point
+  gamma: 2.0
+
+train:
+  lr: 0.001
+  weight_decay: 0.00001
+  epochs: 1000
+  patience: 50
+  device: auto
+  ema_decay: 0.98
+  ema_start_epoch: 30
+
+journal:
+  path: LAB_JOURNAL.md
+  run_name: full_graphsage_focal_alpha050
