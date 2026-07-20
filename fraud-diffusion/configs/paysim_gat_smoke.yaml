@@ -1,0 +1,39 @@
+seed: 42
+
+data:
+  raw_csv: data/raw/paysim.csv
+  processed_path: data/processed/paysim_graph_smoke.pt   # small 150K graph — cheap serverless smoke test
+  fraud_types: [TRANSFER, CASH_OUT]
+  subsample_size: 150000
+  max_node_degree: 20
+  train_frac: 0.70
+  val_frac: 0.15
+  test_frac: 0.15
+
+model:
+  name: gat
+  hidden_dim: 64
+  num_layers: 2
+  heads: 8
+  dropout: 0.6
+
+loss:
+  name: focal
+  alpha: 0.25
+  gamma: 2.0
+
+train:
+  lr: 0.005
+  weight_decay: 0.0005
+  epochs: 10          # just enough to confirm the mini-batch loop runs cleanly end to end
+  patience: 50
+  device: auto
+  ema_decay: 0.98
+  ema_start_epoch: 5
+  mini_batch: true
+  batch_size: 128
+  num_neighbors: [15, 10]
+
+journal:
+  path: LAB_JOURNAL.md
+  run_name: SMOKE_TEST_gat_minibatch_DELETE_ME

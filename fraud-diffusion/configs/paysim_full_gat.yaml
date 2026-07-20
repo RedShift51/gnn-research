@@ -12,16 +12,16 @@ data:
 
 model:
   name: gat
-  # Full-batch GAT materializes per-edge, per-head attention features: on this graph
-  # (28.3M directed edges) the standard hidden_dim=64/heads=8 (effective concat width 512)
-  # tried to allocate ~59GB and OOM'd on a 24GB RTX 4090. GraphSAGE only aggregates
-  # (sum/mean), so it doesn't hit this — attention is inherently pricier per edge.
-  # Cut to hidden_dim=32/heads=4 (concat width 128, ~4x less) to fit; the real long-term
-  # fix for scaling GAT further is neighbor-sampled mini-batch training (PyG NeighborLoader)
-  # instead of full-batch, not just shrinking the model.
-  hidden_dim: 32
+  # Full-batch GAT materializes per-edge, per-head attention features over the WHOLE graph at
+  # once: on this graph (28.3M directed edges) even a shrunk hidden_dim=32/heads=4 OOM'd on both
+  # a 24GB RTX 4090 and a 48GB L40S (needed ~48.8GB, had 47.38GB — see LAB_JOURNAL.md). Switched
+  # to mini-batch/neighbor-sampling (train.mini_batch below) instead of continuing to shrink the
+  # model — that's what actually fixes the scaling problem, and lets us restore full standard
+  # capacity (hidden_dim=64/heads=8, Velickovic et al. 2018 defaults) since each batch only
+  # touches a small sampled subgraph, not all 28.3M edges at once.
+  hidden_dim: 64
   num_layers: 2
-  heads: 4
+  heads: 8
   dropout: 0.6       # standard GAT regularization value (higher than GraphSAGE's 0.5)
 
 loss:
@@ -37,7 +37,10 @@ train:
   device: auto
   ema_decay: 0.98
   ema_start_epoch: 30
+  mini_batch: true
+  batch_size: 128        # seed nodes per batch (their loss is what gets backpropagated)
+  num_neighbors: [15, 10]  # sampled neighbors per hop, one entry per GNN layer (num_layers=2)
 
 journal:
   path: LAB_JOURNAL.md
-  run_name: full_gat_paysim_runpod_4090
+  run_name: full_gat_paysim_minibatch
