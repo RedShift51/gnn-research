@@ -22,6 +22,8 @@ genuinely part of the repo (checked in, reused across runs); "config_dict" is fo
 where committing a new YAML file just to trigger a rebuild would be pure overhead.
 """
 
+import os
+
 import runpod
 
 from data.download import ensure_downloaded
@@ -36,6 +38,7 @@ def handler(job):
     # caught 40%-oversample incident, where a stale worker silently ignored config_dict and ran a
     # completely different experiment with no error).
     print(f"Received job_input: {job_input}")
+    print(f"Worker git commit: {os.environ.get('GIT_COMMIT_SHA', 'unknown')}")
 
     config_dict = job_input.get("config_dict")
     do_preprocess = job_input.get("preprocess", True)
@@ -60,7 +63,11 @@ def handler(job):
         ensure_downloaded()
         preprocess_run(config)
 
-    return train_run(config, config_label)
+    result = train_run(config, config_label)
+    # In the returned output (not just logs) so a stale worker is detectable from the job status
+    # API alone, even in the case where it ISN'T missing a file (e.g. only a few commits behind).
+    result["worker_git_commit"] = os.environ.get("GIT_COMMIT_SHA", "unknown")
+    return result
 
 
 runpod.serverless.start({"handler": handler})

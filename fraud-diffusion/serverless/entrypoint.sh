@@ -23,5 +23,11 @@ else
     git clone "https://${GITHUB_REPO_TOKEN}@github.com/RedShift51/gnn-research.git" /root/repo
 fi
 
+# Exposed so job output can reveal a stale worker even when it ISN'T missing a file (e.g. a few
+# commits behind but everything it needs already exists) — see LAB_JOURNAL.md's stuck-worker
+# incident, where a worker silently never advanced past an old commit despite idle_timeout.
+export GIT_COMMIT_SHA
+GIT_COMMIT_SHA=$(git -C /root/repo rev-parse HEAD)
+
 cd /root/repo/fraud-diffusion
 exec python3 -u -m serverless.handler
