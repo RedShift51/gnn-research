@@ -60,6 +60,12 @@ def deploy(tag: str = "latest", gpu_ids: str = "ADA_24") -> str:
     "ADA_24" (RTX 4090 class, 24GB Ada Lovelace), not "NVIDIA GeForce RTX 4090". See
     https://docs.runpod.io/references/gpu-types#gpu-pools for the full list.
 
+    "ADA_48_PRO" (48GB tier) is NOT Ada-only despite the name — it can schedule onto Blackwell
+    RTX PRO 6000 MIG slices (sm_120), which our image's PyTorch (CUDA 12.4, built for up to
+    sm_90) can't run on at all ("no kernel image is available for execution on the device").
+    Exclude incompatible cards with "-<GPU name>", e.g.
+    "ADA_48_PRO,-NVIDIA RTX PRO 6000 Blackwell Server Edition".
+
     The GHCR package is private (inherited from the private GitHub repo — confirmed via
     the GitHub API: anonymous pull gets 403), so RunPod needs registry credentials to pull
     it. We register those via create_container_registry_auth and reference the returned id
