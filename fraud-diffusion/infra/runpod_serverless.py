@@ -113,6 +113,10 @@ def deploy(tag: str = "latest", gpu_ids: str = "ADA_24") -> str:
         env={
             "KAGGLE_USERNAME": os.environ.get("KAGGLE_USERNAME", ""),
             "KAGGLE_KEY": os.environ.get("KAGGLE_KEY", ""),
+            # entrypoint.sh uses this to clone/pull the private repo at container start instead
+            # of baking application code into the image (see Dockerfile) — code/config changes
+            # take effect on the next worker spin-up with no rebuild.
+            "GITHUB_REPO_TOKEN": os.environ.get("GITHUB_REPO_TOKEN", ""),
         },
     )
     print("Template:", template)

@@ -6,10 +6,16 @@
 # cross-arch QEMU emulation of this (large, CUDA-devel-based) image is unreliable and can hang
 # rather than just run slowly. --platform is still pinned explicitly so the image is correct
 # even if someone does build it from a different host arch.
+#
+# Deliberately does NOT `COPY . .` the application code — only the base image, system deps, and
+# Python deps are baked in. entrypoint.sh clones/pulls the actual code from GitHub at container
+# start instead, so code/config changes need zero rebuild, only genuine requirements.txt changes
+# do. See entrypoint.sh for the tradeoff (only re-syncs on worker spin-up, not mid-session).
 FROM --platform=linux/amd64 runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04
 
-WORKDIR /root/fraud-diffusion
+RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
 
+WORKDIR /root
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
@@ -20,7 +26,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # installable this way on Apple Silicon Mac, which is why local dev only exercises full-batch.
 RUN pip install --no-cache-dir pyg-lib -f https://data.pyg.org/whl/torch-2.4.0+cu124.html
 
-COPY . .
-RUN chmod +x serverless/entrypoint.sh
+COPY serverless/entrypoint.sh /root/entrypoint.sh
+RUN chmod +x /root/entrypoint.sh
 
-CMD ["serverless/entrypoint.sh"]
+CMD ["/root/entrypoint.sh"]

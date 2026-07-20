@@ -23,7 +23,7 @@ _gnnfin_load_secret() {
     fi
 }
 
-for secret in RUNPOD_API_KEY KAGGLE_KEY GHCR_TOKEN; do
+for secret in RUNPOD_API_KEY KAGGLE_KEY GHCR_TOKEN GITHUB_REPO_TOKEN; do
     _gnnfin_load_secret "$secret"
 done
 unset -f _gnnfin_load_secret

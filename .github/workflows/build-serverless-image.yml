@@ -5,14 +5,15 @@ name: Build and push serverless image
 on:
   push:
     branches: [main]
+    # The image no longer COPYs application code in (see Dockerfile/entrypoint.sh — code is
+    # pulled from GitHub at container start instead), so only things that actually change the
+    # image itself need a rebuild: the Dockerfile, entrypoint.sh, and Python dependencies.
+    # data/**, models/**, training/**, evaluation/**, configs/** changes take effect on the next
+    # worker spin-up with NO rebuild.
     paths:
-      - "fraud-diffusion/serverless/**"
+      - "fraud-diffusion/serverless/Dockerfile"
+      - "fraud-diffusion/serverless/entrypoint.sh"
       - "fraud-diffusion/requirements.txt"
-      - "fraud-diffusion/data/**"
-      - "fraud-diffusion/models/**"
-      - "fraud-diffusion/training/**"
-      - "fraud-diffusion/evaluation/**"
-      - "fraud-diffusion/configs/**"
       - ".github/workflows/build-serverless-image.yml"
   workflow_dispatch: {}
 
