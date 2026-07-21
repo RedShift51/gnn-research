@@ -1,0 +1,35 @@
+seed: 42
+
+data:
+  dataset: elliptic
+  raw_dir: data/raw/elliptic/elliptic_bitcoin_dataset
+  processed_path: data/processed/elliptic_graph.pt
+  train_end_step: 34
+  val_end_step: 41
+
+# Soft camouflage-weighted triplet loss -- directly motivated by Run 81: post-break fraud aligns
+# 95% with a camouflaged sub-cluster (~40% of step-42 fraud, mean dist-to-legit 1.14) that already
+# exists within the easy period but gets diluted by averaging with the "obvious" majority (mean
+# dist 1.89) in plain random-sampling triplet loss. Up-weights (not hard-selects, avoiding Run 79's
+# hard-mining instability) triplets whose fraud anchor is currently close to the legit centroid.
+model:
+  name: graphsage_diff
+  hidden_dim: 128
+  num_layers: 2
+  dropout: 0.5
+
+train:
+  lr: 0.001
+  weight_decay: 0.00001
+  epochs: 1000
+  patience: 50
+  device: auto
+
+metric_learning:
+  enabled: true
+  margin: 1.0
+  mining: camo_weighted
+
+journal:
+  path: LAB_JOURNAL.md
+  run_name: elliptic_metric_learning_camo_weighted
