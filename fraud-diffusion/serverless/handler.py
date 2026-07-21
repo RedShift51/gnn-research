@@ -131,7 +131,8 @@ def handler(job):
             mcfg = config["metric_learning"]
             result = metric_learning_run(config, n_triplets_per_epoch=mcfg.get("n_triplets_per_epoch", 2000),
                                           margin=mcfg.get("margin", 1.0),
-                                          compression_weight=mcfg.get("compression_weight", 0.0))
+                                          compression_weight=mcfg.get("compression_weight", 0.0),
+                                          return_embeddings=mcfg.get("return_embeddings", False))
         else:
             result = train_run(config, config_label, git_commit=commit_sha)
     except torch.cuda.OutOfMemoryError:

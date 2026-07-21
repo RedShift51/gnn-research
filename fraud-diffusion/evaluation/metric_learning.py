@@ -76,7 +76,7 @@ def _compression_loss(embeddings: torch.Tensor, fraud_idx: torch.Tensor, legit_i
 
 
 def run(config: dict, n_triplets_per_epoch: int = 2000, margin: float = 1.0,
-        compression_weight: float = 0.0) -> dict:
+        compression_weight: float = 0.0, return_embeddings: bool = False) -> dict:
     wandb_run = init_wandb(config, "metric_learning")
     set_seed(config["seed"])
     device = pick_device(config["train"]["device"])
@@ -183,13 +183,20 @@ def run(config: dict, n_triplets_per_epoch: int = 2000, margin: float = 1.0,
             wandb_run.summary[f"test_{k}"] = v
     wandb.finish()
 
-    return {
+    result = {
         "test": test_metrics, "best_epoch": best_epoch,
         "test_scores": test_scores.tolist(), "test_y": test_y.tolist(),
         "dist_to_fraud": dist_to_fraud.tolist(), "dist_to_legit": dist_to_legit.tolist(),
         "fraud_spread_mean": float(fraud_spread.mean()), "fraud_spread_std": float(fraud_spread.std()),
         "legit_spread_mean": float(legit_spread.mean()), "legit_spread_std": float(legit_spread.std()),
     }
+    if return_embeddings:
+        # Off by default -- only needed for the embedding-dimension / linear-probe analysis
+        # (2026-07-21 discussion), which doesn't need retraining once these are captured.
+        result["test_embeddings"] = test_embeddings[data.test_mask].cpu().numpy().tolist()
+        result["train_fraud_embeddings"] = train_fraud_emb.cpu().numpy().tolist()
+        result["train_legit_embeddings"] = train_legit_emb.cpu().numpy().tolist()
+    return result
 
 
 def main() -> None:
