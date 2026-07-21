@@ -15,6 +15,7 @@ from torch_geometric.data import Data
 from torch_geometric.loader import NeighborLoader
 
 from evaluation.metrics import compute_metrics
+from models.gnn.fagcn import FAGCN
 from models.gnn.gat import GAT
 from models.gnn.graphsage import GraphSAGE, GraphSAGEDiff, GraphSAGEGated, GraphSAGESpectral
 from training.ema import EMA
@@ -86,6 +87,16 @@ def build_model(config: dict, in_dim: int) -> nn.Module:
             feature_encoder_hidden_dim=mcfg.get("feature_encoder_hidden_dim"),
             num_bands=mcfg.get("num_bands", 3),
         )
+    if name == "fagcn":
+        return FAGCN(
+            in_dim=in_dim,
+            hidden_dim=mcfg["hidden_dim"],
+            num_layers=mcfg["num_layers"],
+            dropout=mcfg["dropout"],
+            classifier_hidden_dim=mcfg.get("classifier_hidden_dim"),
+            feature_encoder_hidden_dim=mcfg.get("feature_encoder_hidden_dim"),
+            eps=mcfg.get("eps", 0.2),
+        )
     if name == "gat":
         return GAT(
             in_dim=in_dim,
@@ -95,8 +106,8 @@ def build_model(config: dict, in_dim: int) -> nn.Module:
             dropout=mcfg["dropout"],
         )
     raise ValueError(
-        f"Unknown model.name in config: {name!r} "
-        "(expected 'graphsage', 'graphsage_diff', 'graphsage_gated', 'graphsage_spectral', or 'gat')"
+        f"Unknown model.name in config: {name!r} (expected 'graphsage', 'graphsage_diff', "
+        "'graphsage_gated', 'graphsage_spectral', 'fagcn', or 'gat')"
     )
 
 

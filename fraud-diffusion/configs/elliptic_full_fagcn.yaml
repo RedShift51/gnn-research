@@ -1,0 +1,39 @@
+seed: 42
+
+data:
+  dataset: elliptic
+  raw_dir: data/raw/elliptic/elliptic_bitcoin_dataset
+  processed_path: data/processed/elliptic_graph.pt
+  train_end_step: 34
+  val_end_step: 41
+
+# FAGCN (Frequency-Adaptive GCN, Bo et al. 2021) -- an established, validated heterophily-specific
+# architecture, unlike GraphSAGEGated (homemade learned gate, failed, Run 59/60/61) or
+# GraphSAGESpectral (homemade multi-band filter, failed but confounded with a real implementation
+# bug, Run 62). Each layer's SIGNED gate (in [-1,1], vs GraphSAGEGated's [0,1] sigmoid) can
+# genuinely subtract a dissimilar neighbor's contribution, not just down-weight it toward zero.
+# 2-layer / hidden=128 to stay comparable with the confirmed GraphSAGEDiff baseline.
+model:
+  name: fagcn
+  hidden_dim: 128
+  num_layers: 2
+  dropout: 0.5
+  eps: 0.2
+
+loss:
+  name: focal
+  alpha: 0.25
+  gamma: 2.0
+
+train:
+  lr: 0.001
+  weight_decay: 0.00001
+  epochs: 1000
+  patience: 50
+  device: auto
+  ema_decay: 0.98
+  ema_start_epoch: 30
+
+journal:
+  path: LAB_JOURNAL.md
+  run_name: elliptic_fagcn
