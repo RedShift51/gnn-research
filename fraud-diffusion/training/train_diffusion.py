@@ -4,16 +4,41 @@ stage. Reused by the CLI entrypoint (main, below) and by serverless/handler.py."
 
 import argparse
 import logging
+import os
 from pathlib import Path
 
 import torch
 import torch.nn.functional as F
+import wandb
 import yaml
 
 from models.diffusion.tabddpm import Discriminator, GaussianDiffusion, TabDDPMDenoiser
 
 ROOT = Path(__file__).resolve().parent.parent
 logger = logging.getLogger(__name__)
+
+
+def init_wandb(config: dict):
+    """Same enable/disable conventions as training/train_gnn.py's init_wandb (auto-online when
+    WANDB_API_KEY is present, config["wandb"]["enabled"]=False overrides) but NOT reused directly
+    from there — this needs its own run (name suffixed "_diffusion") since handler.py runs this
+    BEFORE the GNN training phase's own wandb run in the same process, and they'd otherwise share
+    a confusingly-identical display name. Added specifically to answer "is the adversarial loss
+    miscalibrated or is something actually wrong" with real per-epoch curves instead of only the
+    tiny smoke test's printed logs — see LAB_JOURNAL.md's adversarial diffusion entry."""
+    wcfg = config.get("wandb", {})
+    if not wcfg.get("enabled", True):
+        return wandb.init(mode="disabled")
+    mode = wcfg.get("mode") or ("online" if os.environ.get("WANDB_API_KEY") else "disabled")
+    base_name = config.get("journal", {}).get("run_name", "diffusion")
+    return wandb.init(
+        project=wcfg.get("project", "fraud-diffusion"),
+        name=f"{base_name}_diffusion",
+        group=config["data"].get("dataset", "paysim"),
+        config=config.get("diffusion", {}),
+        mode=mode,
+        reinit=True,
+    )
 
 
 def load_config(path: str) -> dict:
@@ -34,6 +59,8 @@ def run_from_config(config: dict) -> Path:
     dcfg = config["diffusion"]
     device = pick_device()
     logger.info(f"Using device: {device}")
+
+    wandb_run = init_wandb(config)
 
     data = torch.load(ROOT / config["data"]["processed_path"], weights_only=False)
 
@@ -122,11 +149,17 @@ def run_from_config(config: dict) -> Path:
             n_batches += 1
 
         avg_loss = epoch_denoise_loss / max(n_batches, 1)
+        avg_adv_loss = epoch_adv_loss / max(n_batches, 1) if adversarial_active else None
+        avg_disc_loss = epoch_disc_loss / max(n_batches, 1) if adversarial_active else None
+        wandb.log(
+            {"epoch": epoch, "loss_denoise": avg_loss, "loss_adv": avg_adv_loss, "loss_disc": avg_disc_loss,
+             "adversarial_active": adversarial_active},
+            step=epoch,
+        )
         if epoch % log_every == 0 or epoch == 1 or epoch == dcfg["epochs"] or epoch == adv_start_epoch:
             msg = f"Diffusion epoch {epoch:4d}/{dcfg['epochs']} | loss_denoise={avg_loss:.4f}"
             if adversarial_active:
-                msg += (f" | loss_adv={epoch_adv_loss / max(n_batches, 1):.4f}"
-                        f" | loss_disc={epoch_disc_loss / max(n_batches, 1):.4f}")
+                msg += f" | loss_adv={avg_adv_loss:.4f} | loss_disc={avg_disc_loss:.4f}"
             logger.info(msg)
 
     out_path = ROOT / dcfg["model_path"]
@@ -138,6 +171,7 @@ def run_from_config(config: dict) -> Path:
         "num_timesteps": dcfg["num_timesteps"],
     }, out_path)
     logger.info(f"Saved diffusion model to {out_path}")
+    wandb.finish()
     return out_path
 
 
