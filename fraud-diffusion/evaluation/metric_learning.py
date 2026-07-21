@@ -46,6 +46,25 @@ def _sample_triplets(fraud_idx: torch.Tensor, legit_idx: torch.Tensor, n_triplet
     return anchor, positive, negative
 
 
+def _hard_triplets(embeddings: torch.Tensor, fraud_idx: torch.Tensor, legit_idx: torch.Tensor) -> tuple:
+    """Batch-hard mining (Hermans et al. 2017, "In Defense of the Triplet Loss for Person
+    Re-Identification") over the FULL train fraud/legit population (small enough here -- ~3462
+    fraud, ~5500 legit -- to do exactly, not just within a mini-batch): for every fraud anchor,
+    the hardest positive is the OTHER fraud point currently farthest away (hardest to pull
+    together), and the hardest negative is the legit point currently closest (hardest to push
+    apart). Directly targets 2026-07-21's finding: post-break fraud is exactly the "hard positive"
+    case random triplet sampling under-weights, since it's rare and far from most other fraud --
+    hard mining forces every epoch to confront it instead of hoping random sampling includes it."""
+    fraud_emb = embeddings[fraud_idx]
+    legit_emb = embeddings[legit_idx]
+    fraud_dist = torch.cdist(fraud_emb, fraud_emb)
+    fraud_dist.fill_diagonal_(-1.0)  # exclude self as its own "positive"
+    hardest_pos = fraud_dist.argmax(dim=1)
+    fraud_legit_dist = torch.cdist(fraud_emb, legit_emb)
+    hardest_neg = fraud_legit_dist.argmin(dim=1)
+    return fraud_emb, fraud_emb[hardest_pos], legit_emb[hardest_neg]
+
+
 def _centroid_scores(embeddings: torch.Tensor, fraud_centroid: torch.Tensor,
                       legit_centroid: torch.Tensor) -> np.ndarray:
     """Fraud-likeness score for nearest-centroid classification: positive = closer to the fraud
@@ -76,7 +95,7 @@ def _compression_loss(embeddings: torch.Tensor, fraud_idx: torch.Tensor, legit_i
 
 
 def run(config: dict, n_triplets_per_epoch: int = 2000, margin: float = 1.0,
-        compression_weight: float = 0.0, return_embeddings: bool = False) -> dict:
+        compression_weight: float = 0.0, return_embeddings: bool = False, mining: str = "random") -> dict:
     wandb_run = init_wandb(config, "metric_learning")
     set_seed(config["seed"])
     device = pick_device(config["train"]["device"])
@@ -113,8 +132,14 @@ def run(config: dict, n_triplets_per_epoch: int = 2000, margin: float = 1.0,
         embeddings = model.embed(data.x, data.train_edge_index)
         embeddings = F.normalize(embeddings, dim=-1)  # unit-norm, standard metric-learning practice
 
-        anchor_idx, pos_idx, neg_idx = _sample_triplets(train_fraud_idx, train_legit_idx, n_triplets_per_epoch, generator)
-        loss = triplet_loss_fn(embeddings[anchor_idx.to(device)], embeddings[pos_idx.to(device)], embeddings[neg_idx.to(device)])
+        if mining == "hard":
+            anchor_emb, pos_emb, neg_emb = _hard_triplets(embeddings, train_fraud_idx.to(device), train_legit_idx.to(device))
+        elif mining == "random":
+            anchor_idx, pos_idx, neg_idx = _sample_triplets(train_fraud_idx, train_legit_idx, n_triplets_per_epoch, generator)
+            anchor_emb, pos_emb, neg_emb = embeddings[anchor_idx.to(device)], embeddings[pos_idx.to(device)], embeddings[neg_idx.to(device)]
+        else:
+            raise ValueError(f"Unknown mining: {mining!r} (expected 'random' or 'hard')")
+        loss = triplet_loss_fn(anchor_emb, pos_emb, neg_emb)
         if compression_weight > 0:
             comp_loss = _compression_loss(embeddings, train_fraud_idx.to(device), train_legit_idx.to(device))
             loss = loss + compression_weight * comp_loss
