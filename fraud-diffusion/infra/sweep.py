@@ -4,9 +4,9 @@ Replaces what had been done by hand for every sweep so far (write one YAML confi
 hyperparameter point, commit, push, fire one `invoke` call per point via the CLI — see
 LAB_JOURNAL.md's alpha sweeps): define a parameter grid once, generate one config_dict per
 combination via runpod_serverless.sweep_config(), and dispatch them all to RunPod IN PARALLEL
-(threaded — Endpoint.run_sync blocks on a network call, so threads overlap the wait). Every job
-still logs to wandb server-side (train_gnn.py's init_wandb), so the wandb UI gives the same
-side-by-side comparison as the printed summary table here.
+(threaded — invoke() blocks on a poll loop, so threads overlap the wait). Every job still logs to
+wandb server-side (train_gnn.py's init_wandb), so the wandb UI gives the same side-by-side
+comparison as the printed summary table here.
 
 This is deliberately a fixed grid, not adaptive search — a real wandb Sweep (bayesian/hyperband,
 picking the next point from prior results) is the natural next step once this pattern is proven,

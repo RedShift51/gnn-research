@@ -140,13 +140,29 @@ def deploy(tag: str = "latest", gpu_ids: str = "ADA_24") -> str:
     return endpoint["id"]
 
 
-def invoke(endpoint_id: str, job_input: dict, timeout: int = 3600) -> dict:
+def invoke(endpoint_id: str, job_input: dict, timeout: int = 3600, poll_interval: int = 10) -> dict:
     """Submit a job and block for the result (like Modal's `.remote()`).
-    For a job you don't want to block on, use `runpod.Endpoint(endpoint_id).run(job_input)`
-    instead and poll `.status()` — useful since training can run long and sync HTTP calls
-    have their own timeout on RunPod's side."""
+
+    Uses async dispatch (`Endpoint.run()`) + polling `.status()`/`.output()`, NOT
+    `Endpoint.run_sync()` — confirmed by direct diagnosis that run_sync silently returns None for
+    jobs longer than a few minutes (RunPod's synchronous /runsync HTTP endpoint appears to have
+    its own connection-level ceiling shorter than a full PaySim training run needs, ~10-15 min,
+    even though the job itself keeps running server-side and completes fine). Every PaySim
+    full-graph job dispatched via run_sync failed this way; Elliptic's small/fast jobs (1-3 min)
+    never hit it, which is why this went unnoticed for a while. Polling has no such ceiling."""
     endpoint = runpod.Endpoint(endpoint_id)
-    return endpoint.run_sync(job_input, timeout=timeout)
+    job = endpoint.run(job_input)
+    start = time.time()
+    status = job.status()
+    while status in ("IN_QUEUE", "IN_PROGRESS"):
+        if time.time() - start > timeout:
+            raise TimeoutError(f"Job {job.job_id} did not complete within {timeout}s (status={status})")
+        time.sleep(poll_interval)
+        status = job.status()
+    output = job.output()
+    if status != "COMPLETED":
+        raise RuntimeError(f"Job {job.job_id} finished with status={status}: {output}")
+    return {"id": job.job_id, "status": status, "output": output}
 
 
 def main() -> None:
