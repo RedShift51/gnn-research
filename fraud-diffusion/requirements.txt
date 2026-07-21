@@ -7,3 +7,4 @@ pyyaml>=6.0
 kaggle>=1.6
 runpod>=1.7
 wandb>=0.17
+anthropic>=0.40
