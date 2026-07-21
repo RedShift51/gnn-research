@@ -1,0 +1,55 @@
+seed: 42
+
+data:
+  dataset: elliptic
+  raw_dir: data/raw/elliptic/elliptic_bitcoin_dataset
+  processed_path: data/processed/elliptic_graph.pt
+  augmented_processed_path: data/processed/elliptic_graph_diffusion_graphsage_diff_augmented.pt
+  train_end_step: 34
+  val_end_step: 41
+
+diffusion:
+  num_timesteps: 1000
+  hidden_dim: 128
+  lr: 0.001
+  epochs: 1000
+  batch_size: 256
+  log_every: 25
+  model_path: models/diffusion/tabddpm_elliptic_graphsage_diff.pt
+
+augment:
+  n_synthetic: 1731    # Run 39's best point
+  sampler: ddim
+  ddim_steps: 100       # Run 40's best point
+  clamp_std: 3.0
+  k_connections: 5
+  attach_to: all
+
+# Combining Run 50's most promising architectural lead (GraphSAGEDiff -- explicit self-vs-
+# neighborhood deviation feature, mean F1=0.7483 vs plain GraphSAGE's 0.7335 across 5 seeds,
+# p=0.125 not yet fully significant) with the best-known diffusion recipe (alpha=0.75,
+# n_synthetic=1731, ddim_steps=100). Untested combination -- the natural next step now that both
+# individually show non-negative signal, unlike GAT.
+model:
+  name: graphsage_diff
+  hidden_dim: 128
+  num_layers: 2
+  dropout: 0.5
+
+loss:
+  name: focal
+  alpha: 0.75
+  gamma: 2.0
+
+train:
+  lr: 0.001
+  weight_decay: 0.00001
+  epochs: 1000
+  patience: 50
+  device: auto
+  ema_decay: 0.98
+  ema_start_epoch: 30
+
+journal:
+  path: LAB_JOURNAL.md
+  run_name: elliptic_graphsage_diff_tabddpm_alpha075
