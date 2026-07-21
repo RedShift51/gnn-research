@@ -1,0 +1,39 @@
+seed: 42
+
+data:
+  dataset: elliptic
+  raw_dir: data/raw/elliptic/elliptic_bitcoin_dataset
+  processed_path: data/processed/elliptic_graph.pt
+  train_end_step: 34
+  val_end_step: 41
+
+# GraphSAGEGated: fraud-specific (CARE-GNN/PC-GNN-inspired) camouflage-resistant neighbor
+# aggregation -- a learned per-edge gate down-weights dissimilar (likely heterophilic/camouflaged)
+# neighbors instead of aggregating all neighbors equally. Directly targets the homophily-dilution
+# root cause (Run 46: fraud-touching edges only 41% homophilic) rather than adding generic
+# capacity (Run 56 showed that doesn't help). Otherwise matches the confirmed
+# elliptic_full_graphsage_diff.yaml baseline (2-layer, linear head) exactly, so any effect is
+# attributable to the gating mechanism alone. 2026-07-21 discussion.
+model:
+  name: graphsage_gated
+  hidden_dim: 128
+  num_layers: 2
+  dropout: 0.5
+
+loss:
+  name: focal
+  alpha: 0.25
+  gamma: 2.0
+
+train:
+  lr: 0.001
+  weight_decay: 0.00001
+  epochs: 1000
+  patience: 50
+  device: auto
+  ema_decay: 0.98
+  ema_start_epoch: 30
+
+journal:
+  path: LAB_JOURNAL.md
+  run_name: elliptic_graphsage_gated
