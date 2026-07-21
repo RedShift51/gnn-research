@@ -5,6 +5,22 @@ from torch_geometric.nn import SAGEConv
 from torch_geometric.utils import scatter
 
 
+def _build_encoder(in_dim: int, feature_encoder_hidden_dim: int | None, dropout: float) -> tuple[nn.Module | None, int]:
+    """Optional MLP applied to raw node features BEFORE message passing (input side) -- distinct
+    from _build_classifier's MLP (output side, tested in LAB_JOURNAL.md Run 56, no effect). Lets
+    the network learn nonlinear raw-feature combinations upstream of structural aggregation,
+    rather than hoping a single linear SAGEConv projection captures them before they get diluted
+    by mean-aggregation over a mostly-legit neighborhood (2026-07-21 discussion)."""
+    if feature_encoder_hidden_dim is None:
+        return None, in_dim
+    encoder = nn.Sequential(
+        nn.Linear(in_dim, feature_encoder_hidden_dim),
+        nn.ReLU(),
+        nn.Dropout(dropout),
+    )
+    return encoder, feature_encoder_hidden_dim
+
+
 def _build_classifier(hidden_dim: int, classifier_hidden_dim: int | None, dropout: float) -> nn.Module:
     """Plain nn.Linear (default, backward compatible) or a small MLP head if classifier_hidden_dim
     is set -- a neural (still purely GNN-family) way of adding the same nonlinear feature-
@@ -25,12 +41,13 @@ class GraphSAGE(nn.Module):
     """2-layer GraphSAGE node classifier (binary fraud logit)."""
 
     def __init__(self, in_dim: int, hidden_dim: int = 128, num_layers: int = 2, dropout: float = 0.3,
-                 classifier_hidden_dim: int | None = None):
+                 classifier_hidden_dim: int | None = None, feature_encoder_hidden_dim: int | None = None):
         super().__init__()
         assert num_layers >= 1
 
+        self.encoder, conv_in_dim = _build_encoder(in_dim, feature_encoder_hidden_dim, dropout)
         self.convs = nn.ModuleList()
-        self.convs.append(SAGEConv(in_dim, hidden_dim))
+        self.convs.append(SAGEConv(conv_in_dim, hidden_dim))
         for _ in range(num_layers - 1):
             self.convs.append(SAGEConv(hidden_dim, hidden_dim))
 
@@ -42,6 +59,8 @@ class GraphSAGE(nn.Module):
         (see evaluation/gnn_rf_hybrid.py): RF is far better than a single linear layer at modeling
         nonlinear interactions between raw and graph-derived features (LAB_JOURNAL.md Run 52), so
         this hands RF the GNN's structural encoding instead of the GNN's own classifier head."""
+        if self.encoder is not None:
+            x = self.encoder(x)
         for i, conv in enumerate(self.convs):
             x = conv(x, edge_index)
             if i < len(self.convs) - 1:
@@ -68,12 +87,13 @@ class GraphSAGEDiff(nn.Module):
     of a typical fraud node's edges, exactly what naive mean-aggregation dilutes away."""
 
     def __init__(self, in_dim: int, hidden_dim: int = 128, num_layers: int = 2, dropout: float = 0.3,
-                 classifier_hidden_dim: int | None = None):
+                 classifier_hidden_dim: int | None = None, feature_encoder_hidden_dim: int | None = None):
         super().__init__()
         assert num_layers >= 1
 
+        self.encoder, conv_in_dim = _build_encoder(in_dim, feature_encoder_hidden_dim, dropout)
         self.convs = nn.ModuleList()
-        self.convs.append(SAGEConv(in_dim * 3, hidden_dim))
+        self.convs.append(SAGEConv(conv_in_dim * 3, hidden_dim))
         for _ in range(num_layers - 1):
             self.convs.append(SAGEConv(hidden_dim, hidden_dim))
 
@@ -81,7 +101,12 @@ class GraphSAGEDiff(nn.Module):
         self.classifier = _build_classifier(hidden_dim, classifier_hidden_dim, dropout)
 
     def embed(self, x: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
-        """See GraphSAGE.embed's docstring — same rationale, for the GNN-embeddings+RF hybrid."""
+        """See GraphSAGE.embed's docstring — same rationale, for the GNN-embeddings+RF hybrid.
+        The (optional) feature encoder runs BEFORE the self-vs-neighbor deviation is computed, so
+        the deviation feature itself is taken in the encoder's learned (potentially nonlinear)
+        feature space rather than raw feature space."""
+        if self.encoder is not None:
+            x = self.encoder(x)
         src, dst = edge_index[0], edge_index[1]
         neighbor_mean = scatter(x[src], dst, dim=0, dim_size=x.shape[0], reduce="mean")
         x = torch.cat([x, neighbor_mean, x - neighbor_mean], dim=-1)

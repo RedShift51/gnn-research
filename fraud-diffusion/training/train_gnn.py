@@ -55,6 +55,7 @@ def build_model(config: dict, in_dim: int) -> nn.Module:
             num_layers=mcfg["num_layers"],
             dropout=mcfg["dropout"],
             classifier_hidden_dim=mcfg.get("classifier_hidden_dim"),
+            feature_encoder_hidden_dim=mcfg.get("feature_encoder_hidden_dim"),
         )
     if name == "graphsage_diff":
         return GraphSAGEDiff(
@@ -63,6 +64,7 @@ def build_model(config: dict, in_dim: int) -> nn.Module:
             num_layers=mcfg["num_layers"],
             dropout=mcfg["dropout"],
             classifier_hidden_dim=mcfg.get("classifier_hidden_dim"),
+            feature_encoder_hidden_dim=mcfg.get("feature_encoder_hidden_dim"),
         )
     if name == "gat":
         return GAT(

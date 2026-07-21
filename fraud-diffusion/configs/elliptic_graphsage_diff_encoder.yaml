@@ -1,0 +1,40 @@
+seed: 42
+
+data:
+  dataset: elliptic
+  raw_dir: data/raw/elliptic/elliptic_bitcoin_dataset
+  processed_path: data/processed/elliptic_graph.pt
+  train_end_step: 34
+  val_end_step: 41
+
+# GraphSAGEDiff + an input-side feature-encoder MLP (raw 165-dim features -> learned 64-dim
+# representation, BEFORE the self-vs-neighbor deviation feature and message passing). Different
+# mechanism than the classifier_hidden_dim MLP tested in Run 56 (output side, no effect, p=1.0) --
+# this tests whether nonlinear feature combination helps when applied upstream of structural
+# aggregation, closer to what RF does directly on raw features. Isolated: everything else matches
+# the confirmed elliptic_full_graphsage_diff.yaml baseline (2-layer, linear head) exactly, so any
+# effect is attributable to the encoder alone. 2026-07-21 discussion.
+model:
+  name: graphsage_diff
+  hidden_dim: 128
+  num_layers: 2
+  dropout: 0.5
+  feature_encoder_hidden_dim: 64
+
+loss:
+  name: focal
+  alpha: 0.25
+  gamma: 2.0
+
+train:
+  lr: 0.001
+  weight_decay: 0.00001
+  epochs: 1000
+  patience: 50
+  device: auto
+  ema_decay: 0.98
+  ema_start_epoch: 30
+
+journal:
+  path: LAB_JOURNAL.md
+  run_name: elliptic_graphsage_diff_encoder
