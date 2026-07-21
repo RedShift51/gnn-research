@@ -144,6 +144,74 @@ class GraphSAGEGated(nn.Module):
         return self.classifier(self.embed(x, edge_index)).squeeze(-1)  # raw logits, shape [N]
 
 
+class GraphSAGESpectral(nn.Module):
+    """Multi-scale spectral-style band-pass filter bank -- a simplified, from-scratch take on
+    BWGNN/GHRN's core idea (Tang et al. 2022, "Rethinking Graph Neural Networks for Anomaly
+    Detection"): anomalous/fraud nodes carry more HIGH-frequency graph-signal energy (they differ
+    sharply from their neighborhood) than normal nodes, so decomposing node signals into several
+    frequency bands and letting the network weigh them should surface camouflaged fraud signal that
+    a single-scale deviation feature (GraphSAGEDiff, Run 49) or a learned per-edge gate (Run 59/60/
+    61, all failed -- likely because a differentiable proxy for same-class similarity isn't
+    reliable when fraud is camouflaged in feature space too) couldn't reliably extract.
+
+    Real BWGNN builds its filter bank from actual Beta-distribution wavelet coefficients over the
+    graph Laplacian's spectrum (requires either eigendecomposition or a polynomial approximation of
+    it). This is a lighter, still principled generalization of GraphSAGEDiff's own trick: h_0 = x,
+    h_{k+1} = mean_aggregate(h_k) (repeated 1-hop unweighted neighbor averaging -- same operator
+    GraphSAGEDiff already uses once, applied K times here for K increasingly-smoothed/lower-
+    frequency views). Consecutive differences b_k = h_k - h_{k+1} isolate the signal specific to
+    each scale (b_0 IS GraphSAGEDiff's original single-hop deviation feature); the final h_K is the
+    purely low-frequency (smoothest) band. A learnable per-band scalar gain lets training decide how
+    much to weigh each frequency band rather than hard-coding equal weight."""
+
+    def __init__(self, in_dim: int, hidden_dim: int = 128, num_layers: int = 2, dropout: float = 0.3,
+                 classifier_hidden_dim: int | None = None, feature_encoder_hidden_dim: int | None = None,
+                 num_bands: int = 3):
+        super().__init__()
+        assert num_layers >= 1
+        assert num_bands >= 1
+        self.num_bands = num_bands
+
+        self.encoder, conv_in_dim = _build_encoder(in_dim, feature_encoder_hidden_dim, dropout)
+        self.band_weights = nn.Parameter(torch.ones(num_bands + 1))  # +1 for the final low-freq band
+        self.convs = nn.ModuleList()
+        self.convs.append(SAGEConv(conv_in_dim * (num_bands + 1), hidden_dim))
+        for _ in range(num_layers - 1):
+            self.convs.append(SAGEConv(hidden_dim, hidden_dim))
+
+        self.dropout = dropout
+        self.classifier = _build_classifier(hidden_dim, classifier_hidden_dim, dropout)
+
+    @staticmethod
+    def _propagate_mean(h: torch.Tensor, edge_index: torch.Tensor, num_nodes: int) -> torch.Tensor:
+        src, dst = edge_index[0], edge_index[1]
+        return scatter(h[src], dst, dim=0, dim_size=num_nodes, reduce="mean")
+
+    def embed(self, x: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
+        """See GraphSAGE.embed's docstring — same rationale, for the GNN-embeddings+RF hybrid."""
+        if self.encoder is not None:
+            x = self.encoder(x)
+        n = x.shape[0]
+        h = x
+        bands = []
+        for k in range(self.num_bands):
+            h_next = self._propagate_mean(h, edge_index, n)
+            bands.append(self.band_weights[k] * (h - h_next))
+            h = h_next
+        bands.append(self.band_weights[-1] * h)  # final purely-low-frequency band
+        x = torch.cat(bands, dim=-1)
+
+        for i, conv in enumerate(self.convs):
+            x = conv(x, edge_index)
+            if i < len(self.convs) - 1:
+                x = F.relu(x)
+                x = F.dropout(x, p=self.dropout, training=self.training)
+        return x
+
+    def forward(self, x: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
+        return self.classifier(self.embed(x, edge_index)).squeeze(-1)  # raw logits, shape [N]
+
+
 class GraphSAGEDiff(nn.Module):
     """GraphSAGE with an explicit self-vs-neighborhood deviation feature at the input:
     concat [x, neighbor_mean(x), x - neighbor_mean(x)] before the first SAGEConv layer.

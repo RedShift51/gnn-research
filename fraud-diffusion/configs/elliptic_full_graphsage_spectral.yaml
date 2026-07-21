@@ -1,0 +1,41 @@
+seed: 42
+
+data:
+  dataset: elliptic
+  raw_dir: data/raw/elliptic/elliptic_bitcoin_dataset
+  processed_path: data/processed/elliptic_graph.pt
+  train_end_step: 34
+  val_end_step: 41
+
+# GraphSAGESpectral: simplified BWGNN/GHRN-style multi-scale spectral band-pass filter bank.
+# Generalizes GraphSAGEDiff's single-hop deviation feature to K=3 bands (h0-h1, h1-h2, h2-h3, plus
+# the final smoothed h3), each with a learnable scalar gain. A fundamentally different mechanism
+# from the failed per-edge learned gate (Run 59/60/61) -- fixed spectral operators plus a handful
+# of learnable band weights, rather than a differentiable similarity proxy that needs (and didn't
+# get, even with an explicit auxiliary loss -- Run 61) reliable label supervision to work.
+# Otherwise matches the confirmed elliptic_full_graphsage_diff.yaml baseline (2-layer, linear head)
+# exactly, so any effect is attributable to the spectral decomposition alone. 2026-07-21 discussion.
+model:
+  name: graphsage_spectral
+  hidden_dim: 128
+  num_layers: 2
+  dropout: 0.5
+  num_bands: 3
+
+loss:
+  name: focal
+  alpha: 0.25
+  gamma: 2.0
+
+train:
+  lr: 0.001
+  weight_decay: 0.00001
+  epochs: 1000
+  patience: 50
+  device: auto
+  ema_decay: 0.98
+  ema_start_epoch: 30
+
+journal:
+  path: LAB_JOURNAL.md
+  run_name: elliptic_graphsage_spectral
