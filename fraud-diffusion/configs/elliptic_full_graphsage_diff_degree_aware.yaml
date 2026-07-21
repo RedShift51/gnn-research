@@ -1,0 +1,38 @@
+seed: 42
+
+data:
+  dataset: elliptic
+  raw_dir: data/raw/elliptic/elliptic_bitcoin_dataset
+  processed_path: data/processed/elliptic_graph.pt
+  train_end_step: 34
+  val_end_step: 41
+
+# GraphSAGEDiffDegreeAware: adds an explicit log1p(degree) feature right before the classifier.
+# Directly targets Run 67's finding #2 -- GraphSAGEDiff's own EXTRA mistakes (beyond RF's)
+# concentrate on isolated nodes (46.2% isolated vs 24.9% for the general hard core), plausibly
+# because the model has no explicit signal that a degenerate (all-zero) neighbor_mean means
+# "nothing to aggregate" vs. a genuinely uninformative real neighborhood. Otherwise identical to
+# the confirmed elliptic_full_graphsage_diff.yaml baseline. 2026-07-21 discussion.
+model:
+  name: graphsage_diff_degree_aware
+  hidden_dim: 128
+  num_layers: 2
+  dropout: 0.5
+
+loss:
+  name: focal
+  alpha: 0.25
+  gamma: 2.0
+
+train:
+  lr: 0.001
+  weight_decay: 0.00001
+  epochs: 1000
+  patience: 50
+  device: auto
+  ema_decay: 0.98
+  ema_start_epoch: 30
+
+journal:
+  path: LAB_JOURNAL.md
+  run_name: elliptic_graphsage_diff_degree_aware

@@ -260,3 +260,30 @@ class GraphSAGEDiff(nn.Module):
 
     def forward(self, x: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
         return self.classifier(self.embed(x, edge_index)).squeeze(-1)  # raw logits, shape [N]
+
+
+class GraphSAGEDiffDegreeAware(GraphSAGEDiff):
+    """GraphSAGEDiff + an explicit log1p(degree) feature concatenated right before the classifier
+    -- directly targets LAB_JOURNAL.md Run 67's finding #2: GraphSAGEDiff's own EXTRA mistakes
+    (beyond RF's) concentrate on ISOLATED nodes (46.2% of them have zero known neighbors, vs 24.9%
+    for the general "hard core"). For an isolated node, neighbor_mean is a degenerate all-zero
+    vector (scatter's default with no source rows), making the "deviation" feature x-neighbor_mean
+    collapse to plain x again -- structurally uninformative, and the model currently has no
+    explicit signal that this happened vs. a genuinely-informative zero-mean neighborhood. Giving
+    the classifier the raw degree lets it learn to trust the structural embedding less (or a
+    feature-only decision more) specifically when there was nothing real to aggregate, rather than
+    always trusting the same embedding regardless of whether structure was actually available."""
+
+    def __init__(self, in_dim: int, hidden_dim: int = 128, num_layers: int = 2, dropout: float = 0.3,
+                 classifier_hidden_dim: int | None = None, feature_encoder_hidden_dim: int | None = None):
+        super().__init__(in_dim, hidden_dim, num_layers, dropout, classifier_hidden_dim, feature_encoder_hidden_dim)
+        # Reuses _build_classifier but with hidden_dim+1 input (embedding + degree scalar) --
+        # overrides the parent's classifier, built with hidden_dim only.
+        self.classifier = _build_classifier(hidden_dim + 1, classifier_hidden_dim, dropout)
+
+    def forward(self, x: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
+        embedding = self.embed(x, edge_index)
+        dst = edge_index[1]
+        degree = scatter(torch.ones_like(dst, dtype=x.dtype), dst, dim=0, dim_size=x.shape[0], reduce="sum")
+        degree_feat = torch.log1p(degree).unsqueeze(-1)
+        return self.classifier(torch.cat([embedding, degree_feat], dim=-1)).squeeze(-1)
