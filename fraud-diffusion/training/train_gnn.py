@@ -229,6 +229,17 @@ def run_from_config(config: dict, config_path: str, git_commit: str | None = Non
     now on both sides."""
     set_seed(config["seed"])
 
+    # RunPod reuses the same long-lived worker process across many jobs (see entrypoint.sh's own
+    # comment on this, and LAB_JOURNAL.md's stale-worker incidents) — within that one process,
+    # PyTorch's CUDA caching allocator can retain "reserved but unallocated" memory from a PREVIOUS
+    # job's now-freed tensors, never returning it to the OS. Confirmed directly: a PaySim job
+    # OOM'd with "15.42 GiB in use" within ~84s of starting, at the same backward() call that
+    # succeeded fine on a fresh worker before. Clearing at the start of every job is cheap
+    # insurance (a no-op if the cache is already clean) against a fresh job inheriting a dirty
+    # cache from whatever ran here before it.
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
     # Print the actual config being used, in full, before anything else — a stale/warm serverless
     # worker silently running the wrong config (e.g. defaulting away from an unrecognized
     # config_dict key) is otherwise invisible until you notice the results look off. Cheap

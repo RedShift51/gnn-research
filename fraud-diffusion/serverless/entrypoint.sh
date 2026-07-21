@@ -4,6 +4,11 @@
 # template) into ~/.kaggle/kaggle.json, since data/download.py expects that file.
 set -e
 
+# PyTorch's own suggested fix for "reserved but unallocated" CUDA memory fragmentation (seen
+# directly: a PaySim full-graph job OOM'd with 9.72 GiB reserved-but-unallocated on a 24GB GPU).
+# Must be set before the Python process starts — the CUDA allocator reads it once at init.
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
 if [ -n "$KAGGLE_USERNAME" ] && [ -n "$KAGGLE_KEY" ] && [ ! -f ~/.kaggle/kaggle.json ]; then
     mkdir -p ~/.kaggle
     printf '{"username":"%s","key":"%s"}' "$KAGGLE_USERNAME" "$KAGGLE_KEY" > ~/.kaggle/kaggle.json
