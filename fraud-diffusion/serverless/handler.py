@@ -104,7 +104,7 @@ def handler(job):
         config["data"]["processed_path"] = config["data"]["augmented_processed_path"]
         print(f"GNN training will use the augmented graph: {config['data']['processed_path']}")
 
-    result = train_run(config, config_label)
+    result = train_run(config, config_label, git_commit=commit_sha)
     # In the returned output (not just logs) so a stale worker is detectable from the job status
     # API alone, even in the case where it ISN'T missing a file (e.g. only a few commits behind).
     result["worker_git_commit"] = commit_sha

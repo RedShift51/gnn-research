@@ -201,9 +201,12 @@ def init_wandb(config: dict, config_path: str):
     )
 
 
-def run_from_config(config: dict, config_path: str) -> dict:
+def run_from_config(config: dict, config_path: str, git_commit: str | None = None) -> dict:
     """Run the full train+eval pipeline for an already-loaded config. Reused by the CLI
-    entrypoint (main, below) and by runpod/handler.py for serverless invocation."""
+    entrypoint (main, below) and by runpod/handler.py for serverless invocation. git_commit, when
+    passed by handler.py, records which exact worker checkout produced this run in wandb too (not
+    just the job's returned output) — the same "detect a stale worker" insurance as config_label,
+    now on both sides."""
     set_seed(config["seed"])
 
     # Print the actual config being used, in full, before anything else — a stale/warm serverless
@@ -214,11 +217,15 @@ def run_from_config(config: dict, config_path: str) -> dict:
     print(f"Full config: {config}")
 
     wandb_run = init_wandb(config, config_path)
+    if git_commit is not None:
+        wandb_run.summary["worker_git_commit"] = git_commit
 
     device = pick_device(config["train"]["device"])
     print(f"Using device: {device}")
 
     data = torch.load(ROOT / config["data"]["processed_path"], weights_only=False)
+    wandb_run.summary["n_nodes"] = data.num_nodes
+    wandb_run.summary["n_edges"] = data.edge_index.shape[1]
 
     mini_batch = config["train"].get("mini_batch", False)
 
@@ -335,13 +342,18 @@ def run_from_config(config: dict, config_path: str) -> dict:
     print(f"Test: {test_metrics}")
 
     wandb.log({"best_epoch": best_epoch, "final_val": val_metrics, "final_test": test_metrics})
-    wandb.summary["best_epoch"] = best_epoch
-    for k, v in val_metrics.items():
-        if not isinstance(v, dict):
-            wandb.summary[f"val_{k}"] = v
-    for k, v in test_metrics.items():
-        if not isinstance(v, dict):
-            wandb.summary[f"test_{k}"] = v
+    wandb_run.summary["best_epoch"] = best_epoch
+    for split_name, metrics in (("val", val_metrics), ("test", test_metrics)):
+        for k, v in metrics.items():
+            if isinstance(v, dict):
+                # confusion matrix: flatten tp/fp/tn/fn too, not just the scalar metrics derived
+                # from it — this exact breakdown is what root-caused the Elliptic diffusion
+                # regression (LAB_JOURNAL.md Run 32), skipping it here would lose the one thing
+                # that made that diagnosis possible from the run comparison table.
+                for sub_k, sub_v in v.items():
+                    wandb_run.summary[f"{split_name}_{k}_{sub_k}"] = sub_v
+            else:
+                wandb_run.summary[f"{split_name}_{k}"] = v
 
     append_journal_entry(
         config, config_path, device,
