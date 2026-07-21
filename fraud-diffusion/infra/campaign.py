@@ -20,17 +20,61 @@ Usage:
 import argparse
 import logging
 import os
+from datetime import date
+from pathlib import Path
 
 import runpod
+import yaml
 
 from infra.multi_seed import compare, format_report
 
+ROOT = Path(__file__).resolve().parent.parent
 logger = logging.getLogger(__name__)
+
+
+def _run_name(config_path: str) -> str:
+    """journal.run_name if the config declares one, else the bare filename -- just a label, not
+    used to locate anything."""
+    try:
+        with open(config_path) as f:
+            config = yaml.safe_load(f)
+        return config.get("journal", {}).get("run_name", config_path)
+    except Exception:
+        return config_path
+
+
+def append_campaign_journal_entry(journal_path: str, best_config_path: str, candidate_path: str,
+                                   report: str, decision: str, promoted: bool) -> int:
+    """Auto-appends a Run entry to LAB_JOURNAL.md for one campaign comparison -- same run-numbering
+    convention as training/train_gnn.py's append_journal_entry() (count existing '\\n## [' entries
+    + 1), so campaign runs interleave correctly with training-run entries in the same sequential
+    numbering. Observations/Next are left as manual fill-in placeholders, same as train_gnn.py's own
+    auto-entries: a script can report WHAT happened (the numbers, the decision) but not WHY, or
+    what it means for the project -- that's still a human/model judgment call, not automated."""
+    path = ROOT / journal_path
+    existing_runs = path.read_text().count("\n## [") if path.exists() else 0
+    run_id = existing_runs + 1
+
+    label_a, label_b = _run_name(best_config_path), _run_name(candidate_path)
+    entry = f"""
+## [{date.today().isoformat()}] Run {run_id} — campaign: {label_b} vs {label_a}
+- Dispatched via infra/campaign.py's auto-compare-and-promote runner (best={best_config_path},
+  candidate={candidate_path}).
+{report}
+- Decision: {decision}
+- Observations: (fill in manually)
+- Next: (fill in manually)
+"""
+    with open(path, "a") as f:
+        f.write(entry)
+    logger.info(f"Appended campaign run {run_id} to {journal_path}")
+    return run_id
 
 
 def run_campaign(endpoint_id: str, best_config_path: str, candidate_paths: list, seeds: list,
                   metric: str = "f1_macro", split: str = "test", max_workers: int = 4,
-                  timeout: int = 3600, preprocess: bool = True, significance: float = 0.05) -> dict:
+                  timeout: int = 3600, preprocess: bool = True, significance: float = 0.05,
+                  journal: bool = True) -> dict:
     current_best = best_config_path
     history = []
 
@@ -61,12 +105,29 @@ def run_campaign(endpoint_id: str, best_config_path: str, candidate_paths: list,
         )
         logger.info(f"Campaign decision for {candidate_path}: {decision}")
 
+        run_id = None
+        if journal:
+            # Use the candidate config's OWN declared journal path (every config in this repo
+            # sets journal.path, normally LAB_JOURNAL.md) rather than hard-coding it, so a
+            # campaign over configs pointed at a different journal file still lands correctly.
+            journal_path = None
+            try:
+                with open(candidate_path) as f:
+                    journal_path = yaml.safe_load(f).get("journal", {}).get("path")
+            except Exception:
+                pass
+            if journal_path:
+                run_id = append_campaign_journal_entry(
+                    journal_path, current_best, candidate_path, report, decision, promoted,
+                )
+
         history.append({
             "best_before": current_best,
             "candidate": candidate_path,
             "report": report,
             "promoted": promoted,
             "decision": decision,
+            "journal_run_id": run_id,
         })
 
         if promoted:
@@ -91,6 +152,7 @@ def main() -> None:
     run_p.add_argument("--timeout", type=int, default=3600)
     run_p.add_argument("--no-preprocess", action="store_true")
     run_p.add_argument("--significance", type=float, default=0.05)
+    run_p.add_argument("--no-journal", action="store_true", help="skip auto-appending to LAB_JOURNAL.md")
 
     args = parser.parse_args()
     runpod.api_key = os.environ["RUNPOD_API_KEY"]
@@ -99,12 +161,14 @@ def main() -> None:
     if args.command == "run":
         result = run_campaign(args.endpoint_id, args.best, args.candidates, seeds, args.metric,
                                args.split, args.max_workers, args.timeout, not args.no_preprocess,
-                               args.significance)
+                               args.significance, journal=not args.no_journal)
         print(f"\nFinal best: {result['final_best']}\n")
         for entry in result["history"]:
             print(f"--- {entry['candidate']} ---")
             print(entry["report"])
             print(entry["decision"])
+            if entry["journal_run_id"]:
+                print(f"(logged as Run {entry['journal_run_id']} in LAB_JOURNAL.md)")
             print()
 
 
