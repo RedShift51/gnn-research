@@ -20,14 +20,20 @@ class GraphSAGE(nn.Module):
         self.dropout = dropout
         self.classifier = nn.Linear(hidden_dim, 1)
 
-    def forward(self, x: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
+    def embed(self, x: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
+        """Node embeddings (last hidden layer, pre-classifier) — for the GNN-embeddings+RF hybrid
+        (see evaluation/gnn_rf_hybrid.py): RF is far better than a single linear layer at modeling
+        nonlinear interactions between raw and graph-derived features (LAB_JOURNAL.md Run 52), so
+        this hands RF the GNN's structural encoding instead of the GNN's own classifier head."""
         for i, conv in enumerate(self.convs):
             x = conv(x, edge_index)
             if i < len(self.convs) - 1:
                 x = F.relu(x)
                 x = F.dropout(x, p=self.dropout, training=self.training)
+        return x
 
-        return self.classifier(x).squeeze(-1)  # raw logits, shape [N]
+    def forward(self, x: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
+        return self.classifier(self.embed(x, edge_index)).squeeze(-1)  # raw logits, shape [N]
 
 
 class GraphSAGEDiff(nn.Module):
@@ -56,7 +62,8 @@ class GraphSAGEDiff(nn.Module):
         self.dropout = dropout
         self.classifier = nn.Linear(hidden_dim, 1)
 
-    def forward(self, x: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
+    def embed(self, x: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
+        """See GraphSAGE.embed's docstring — same rationale, for the GNN-embeddings+RF hybrid."""
         src, dst = edge_index[0], edge_index[1]
         neighbor_mean = scatter(x[src], dst, dim=0, dim_size=x.shape[0], reduce="mean")
         x = torch.cat([x, neighbor_mean, x - neighbor_mean], dim=-1)
@@ -66,5 +73,7 @@ class GraphSAGEDiff(nn.Module):
             if i < len(self.convs) - 1:
                 x = F.relu(x)
                 x = F.dropout(x, p=self.dropout, training=self.training)
+        return x
 
-        return self.classifier(x).squeeze(-1)  # raw logits, shape [N]
+    def forward(self, x: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
+        return self.classifier(self.embed(x, edge_index)).squeeze(-1)  # raw logits, shape [N]

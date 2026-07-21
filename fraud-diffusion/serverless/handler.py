@@ -113,7 +113,14 @@ def handler(job):
         logger.info(f"GNN training will use the augmented graph: {config['data']['processed_path']}")
 
     try:
-        result = train_run(config, config_label, git_commit=commit_sha)
+        if config.get("hybrid", {}).get("enabled"):
+            # GNN-embeddings + RF hybrid (evaluation/gnn_rf_hybrid.py) instead of the GNN's own
+            # classifier head — see LAB_JOURNAL.md Run 52 for the motivation (RF models nonlinear
+            # feature interactions far better than a single linear layer does).
+            from evaluation.gnn_rf_hybrid import run as hybrid_run
+            result = hybrid_run(config, n_estimators=config["hybrid"].get("n_estimators", 300))
+        else:
+            result = train_run(config, config_label, git_commit=commit_sha)
     except torch.cuda.OutOfMemoryError:
         # A worker that OOMs mid-training stays "healthy" from RunPod's point of view — the
         # exception is caught by RunPod's own job wrapper, not the worker process, which keeps
