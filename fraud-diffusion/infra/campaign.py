@@ -20,6 +20,7 @@ Usage:
 import argparse
 import logging
 import os
+import re
 from datetime import date
 from pathlib import Path
 
@@ -52,8 +53,14 @@ def append_campaign_journal_entry(journal_path: str, best_config_path: str, cand
     auto-entries: a script can report WHAT happened (the numbers, the decision) but not WHY, or
     what it means for the project -- that's still a human/model judgment call, not automated."""
     path = ROOT / journal_path
-    existing_runs = path.read_text().count("\n## [") if path.exists() else 0
-    run_id = existing_runs + 1
+    # max(existing "Run N") + 1, NOT a raw header count -- a plain count collides whenever the
+    # file already has any gap or duplicate (confirmed: this journal already had a few pre-existing
+    # collisions from before this session, e.g. Run 24/26/44/58, and this exact function produced
+    # one more, a duplicate Run 65, when a manual edit and a campaign run landed close together).
+    # Max-based numbering is robust to that history regardless of how it got there.
+    text = path.read_text() if path.exists() else ""
+    existing_run_numbers = [int(m) for m in re.findall(r"\n## \[.*?\] Run (\d+)", text)]
+    run_id = max(existing_run_numbers, default=0) + 1
 
     label_a, label_b = _run_name(best_config_path), _run_name(candidate_path)
     entry = f"""

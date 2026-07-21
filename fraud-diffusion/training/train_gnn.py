@@ -2,6 +2,7 @@ import argparse
 import logging
 import os
 import random
+import re
 from datetime import date
 from pathlib import Path
 
@@ -207,10 +208,13 @@ def append_journal_entry(config: dict, config_path: str, device: torch.device,
     journal_path = ROOT / config["journal"]["path"]
     run_name = config["journal"]["run_name"]
 
-    existing_runs = 0
-    if journal_path.exists():
-        existing_runs = journal_path.read_text().count("\n## [")
-    run_id = existing_runs + 1
+    # max(existing "Run N") + 1, NOT a raw header count -- a plain count collides whenever the
+    # file already has any gap or duplicate (this journal already had a few, e.g. Run 24/26/44/58,
+    # predating this fix). Max-based numbering is robust to that history regardless of how it
+    # got there.
+    text = journal_path.read_text() if journal_path.exists() else ""
+    existing_run_numbers = [int(m) for m in re.findall(r"\n## \[.*?\] Run (\d+)", text)]
+    run_id = max(existing_run_numbers, default=0) + 1
 
     dcfg, mcfg, lcfg, tcfg = config["data"], config["model"], config["loss"], config["train"]
 
