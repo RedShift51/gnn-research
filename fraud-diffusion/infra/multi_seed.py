@@ -123,11 +123,20 @@ def format_report(result: dict, label_a: str, label_b: str, metric: str = "f1_ma
     after compare() instead of hand-formatting the summary/Wilcoxon dict."""
     sa, sb = result["config_a"]["summary"], result["config_b"]["summary"]
     w = result["wilcoxon"] or {}
+
+    def _fmt(s: dict) -> str:
+        # mean/std are None when EVERY seed failed (e.g. a network drop mid-poll -- confirmed:
+        # this crashed with an unhandled TypeError formatting None as a float, the first time all
+        # 5 seeds of a config failed at once). Report that plainly instead of crashing.
+        if s["mean"] is None:
+            return f"FAILED (0/{len(s.get('values', [])) or '?'} seeds succeeded)"
+        return f"{s['mean']:.4f} | {s['std']:.4f} | {s['n']}"
+
     lines = [
         f"| Config | Mean {metric} | Std | n |",
         "|---|---|---|---|",
-        f"| {label_a} | {sa['mean']:.4f} | {sa['std']:.4f} | {sa['n']} |",
-        f"| {label_b} | {sb['mean']:.4f} | {sb['std']:.4f} | {sb['n']} |",
+        f"| {label_a} | {_fmt(sa)} |",
+        f"| {label_b} | {_fmt(sb)} |",
         "",
     ]
     if "p_value" in w:

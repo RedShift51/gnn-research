@@ -87,9 +87,21 @@ def run_campaign(endpoint_id: str, best_config_path: str, candidate_paths: list,
 
     for candidate_path in candidate_paths:
         logger.info(f"Campaign: comparing current best ({current_best}) vs candidate ({candidate_path})...")
-        result = compare(endpoint_id, current_best, candidate_path, seeds, metric, split,
-                          max_workers, timeout, preprocess)
-        report = format_report(result, current_best, candidate_path, metric)
+        try:
+            result = compare(endpoint_id, current_best, candidate_path, seeds, metric, split,
+                              max_workers, timeout, preprocess)
+            report = format_report(result, current_best, candidate_path, metric)
+        except Exception as e:
+            # A crash on ONE candidate (confirmed: a network drop mid-poll took down the entire
+            # remaining queue, including candidates that had nothing to do with the failure) must
+            # not stop the rest of the queue -- record it and move on to the next candidate against
+            # the SAME current_best (nothing was promoted, so this is the correct fallback state).
+            logger.error(f"Campaign: {candidate_path} crashed ({e}) -- skipping, keeping current best")
+            history.append({
+                "best_before": current_best, "candidate": candidate_path, "report": None,
+                "promoted": False, "decision": f"CRASHED: {e}", "journal_run_id": None,
+            })
+            continue
 
         mean_best = result["config_a"]["summary"]["mean"]
         mean_candidate = result["config_b"]["summary"]["mean"]
