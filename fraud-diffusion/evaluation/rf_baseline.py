@@ -25,9 +25,17 @@ ROOT = Path(__file__).resolve().parent.parent
 logger = logging.getLogger(__name__)
 
 
-def run(processed_path: str, n_estimators: int = 300, max_depth: int | None = None, seed: int = 42) -> dict:
+def run(processed_path: str, n_estimators: int = 300, max_depth: int | None = None, seed: int = 42,
+        feature_slice: slice | None = None) -> dict:
+    """feature_slice, if given, restricts to a subset of feature columns -- e.g. slice(0, 93) for
+    Elliptic's 93 "local" (per-transaction) columns only, excluding the 72 "aggregated" columns
+    (f93-f164, computed by the dataset's original authors from one-hop neighbor info). Tests
+    whether those pre-aggregated columns already capture most of the graph-derived signal our own
+    GNN message-passing would otherwise add (see LAB_JOURNAL.md's Elliptic RF-vs-GNN discussion)."""
     data = torch.load(ROOT / processed_path, weights_only=False)
     x = data.x.numpy()
+    if feature_slice is not None:
+        x = x[:, feature_slice]
     y = data.y.numpy()
 
     clf = RandomForestClassifier(
@@ -41,7 +49,8 @@ def run(processed_path: str, n_estimators: int = 300, max_depth: int | None = No
     val_metrics = compute_metrics(y[data.val_mask.numpy()], val_probs)
     test_metrics = compute_metrics(y[data.test_mask.numpy()], test_probs)
 
-    logger.info(f"RF baseline ({processed_path}): Val={val_metrics} Test={test_metrics}")
+    logger.info(f"RF baseline ({processed_path}, feature_slice={feature_slice}): "
+                f"Val={val_metrics} Test={test_metrics}")
     return {"val": val_metrics, "test": test_metrics}
 
 
@@ -52,8 +61,11 @@ def main() -> None:
     parser.add_argument("--n-estimators", type=int, default=300)
     parser.add_argument("--max-depth", type=int, default=None)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--feature-start", type=int, default=None)
+    parser.add_argument("--feature-end", type=int, default=None)
     args = parser.parse_args()
-    result = run(args.processed_path, args.n_estimators, args.max_depth, args.seed)
+    feature_slice = slice(args.feature_start, args.feature_end) if (args.feature_start or args.feature_end) else None
+    result = run(args.processed_path, args.n_estimators, args.max_depth, args.seed, feature_slice)
     print(result)
 
 
