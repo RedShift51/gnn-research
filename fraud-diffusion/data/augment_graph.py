@@ -58,6 +58,18 @@ def run_from_config(config: dict) -> Path:
     new_indices = torch.arange(n_original, n_original + n_synthetic)
     train_idx = data.train_mask.nonzero(as_tuple=True)[0]
 
+    # attach_to="fraud_only" restricts candidate connections to real fraud TRAIN nodes instead of
+    # the whole TRAIN pool. Default ("all") preserves original behavior. On PaySim's huge graph
+    # (~1.9M train nodes) attaching to the whole pool only perturbs ~1% of train nodes regardless;
+    # on Elliptic's much smaller graph (~30K train nodes) the same k_connections/n_synthetic recipe
+    # attached ~44% of ALL train nodes (mostly legit) to a synthetic fraud neighbor — a much bigger,
+    # uncontrolled structural perturbation, and a plausible cause of Run 33's uniformly bad sweep.
+    attach_to = acfg.get("attach_to", "all")
+    if attach_to == "fraud_only":
+        train_idx = train_idx[data.y[train_idx] == 1]
+    elif attach_to != "all":
+        raise ValueError(f"Unknown augment.attach_to: {attach_to!r} (expected 'all' or 'fraud_only')")
+
     # Attach each synthetic fraud node to a random sample of real TRAIN nodes, so it actually
     # participates in message passing (like a real transaction touching real accounts) instead
     # of sitting isolated in the graph.

@@ -1,0 +1,59 @@
+seed: 42
+
+data:
+  dataset: elliptic
+  raw_dir: data/raw/elliptic/elliptic_bitcoin_dataset
+  processed_path: data/processed/elliptic_graph.pt
+  augmented_processed_path: data/processed/elliptic_graph_diffusion_fraudonly_k1_augmented.pt
+  train_end_step: 34
+  val_end_step: 41
+
+diffusion:
+  num_timesteps: 1000
+  hidden_dim: 128
+  lr: 0.001
+  epochs: 1000
+  batch_size: 256
+  log_every: 25
+  model_path: models/diffusion/tabddpm_elliptic.pt
+
+# Run 33's full alpha sweep (0.25-0.95) was uniformly worse than the no-diffusion baseline on
+# Elliptic — root-caused to data/augment_graph.py attaching each synthetic fraud node to
+# k_connections=5 RANDOM real TRAIN nodes (mostly legit, since fraud is only ~11.6% of train).
+# That recipe was implicitly tuned for PaySim's huge graph (~1.9M train nodes -> only ~1% of
+# train nodes touched); on Elliptic's much smaller graph (~30K train nodes) it touched ~44% of
+# ALL train nodes with a synthetic-fraud edge — a massive, uncontrolled structural perturbation.
+# This config fixes both: attach_to=fraud_only (synthetic fraud only connects to REAL fraud train
+# nodes, not the legit majority) and k_connections=1 (touches ~63% of the much smaller FRAUD-only
+# pool once each, instead of ~5x-oversampling the whole train pool). alpha=0.25 matches the honest
+# baseline (Run 26/29) exactly, for the fairest possible comparison of diffusion's own contribution.
+augment:
+  n_synthetic: 3462
+  sampler: ddim
+  ddim_steps: 50
+  k_connections: 1
+  attach_to: fraud_only
+
+model:
+  name: graphsage
+  hidden_dim: 128
+  num_layers: 2
+  dropout: 0.5
+
+loss:
+  name: focal
+  alpha: 0.25
+  gamma: 2.0
+
+train:
+  lr: 0.001
+  weight_decay: 0.00001
+  epochs: 1000
+  patience: 50
+  device: auto
+  ema_decay: 0.98
+  ema_start_epoch: 30
+
+journal:
+  path: LAB_JOURNAL.md
+  run_name: elliptic_graphsage_tabddpm_fraudonly_k1_alpha025
