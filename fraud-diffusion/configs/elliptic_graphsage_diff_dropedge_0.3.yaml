@@ -1,0 +1,37 @@
+seed: 42
+
+data:
+  dataset: elliptic
+  raw_dir: data/raw/elliptic/elliptic_bitcoin_dataset
+  processed_path: data/processed/elliptic_graph.pt
+  train_end_step: 34
+  val_end_step: 41
+
+# GraphSAGEDiff + DropEdge(rate=0.3) -- structure-perturbation augmentation (Rong et al. 2020),
+# a genuinely different mechanism than TabDDPM's synthetic-node injection (which doesn't stack
+# additively with anything tried this session -- 4+ confirmed instances). Otherwise identical to
+# the confirmed elliptic_full_graphsage_diff.yaml baseline. 2026-07-21 discussion.
+model:
+  name: graphsage_diff
+  hidden_dim: 128
+  num_layers: 2
+  dropout: 0.5
+
+loss:
+  name: focal
+  alpha: 0.25
+  gamma: 2.0
+
+train:
+  lr: 0.001
+  weight_decay: 0.00001
+  epochs: 1000
+  patience: 50
+  device: auto
+  ema_decay: 0.98
+  ema_start_epoch: 30
+  drop_edge_rate: 0.3
+
+journal:
+  path: LAB_JOURNAL.md
+  run_name: elliptic_graphsage_diff_dropedge_0.3
