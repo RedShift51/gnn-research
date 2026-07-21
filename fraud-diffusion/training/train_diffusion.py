@@ -54,6 +54,19 @@ def pick_device() -> torch.device:
     return torch.device("cpu")
 
 
+def _covariance_eigvals(x: torch.Tensor, eps: float = 1e-4) -> torch.Tensor:
+    """Eigenvalues of x's feature covariance matrix, ascending (torch.linalg.eigvalsh's own
+    convention) — the concrete operationalization of "make the synthetic samples' spectrum
+    resemble the real fraud spectrum" (2026-07-21 discussion): a small ridge (eps*I) keeps the
+    matrix well-conditioned since a batch (or even the full ~3.4K-sample fraud set) in 165 dims
+    is not enormously over-determined. This is the same idea behind FID's covariance term, applied
+    directly to node features rather than an embedding space."""
+    x_centered = x - x.mean(dim=0, keepdim=True)
+    cov = (x_centered.T @ x_centered) / (x.shape[0] - 1)
+    cov = cov + eps * torch.eye(cov.shape[0], device=cov.device, dtype=cov.dtype)
+    return torch.linalg.eigvalsh(cov)
+
+
 def run_from_config(config: dict) -> Path:
     logger.info(f"train_diffusion config: {config}")
     dcfg = config["diffusion"]
@@ -103,16 +116,35 @@ def run_from_config(config: dict) -> Path:
         logger.info(f"Adversarial phase enabled: starts at epoch {adv_start_epoch}/{dcfg['epochs']}, "
                     f"lambda={adv_lambda}")
 
+    # Optional spectral-matching auxiliary loss (off by default): compares the eigenvalue spectrum
+    # of the synthetic (x0_pred) feature covariance against the REAL fraud set's own covariance
+    # spectrum (precomputed once — comparing against a single batch's real covariance would be a
+    # much noisier target). Same one-step x0_pred trick as the adversarial loss, for the same
+    # reason (a full multi-step sample every batch would be far too expensive).
+    spec_cfg = dcfg.get("spectral", {})
+    spec_enabled = spec_cfg.get("enabled", False)
+    spec_start_epoch, spec_lambda, real_eigvals = None, None, None
+    if spec_enabled:
+        spec_start_epoch = spec_cfg.get("start_epoch", dcfg["epochs"] // 2)
+        spec_lambda = spec_cfg.get("lambda_spectral", 0.1)
+        real_eigvals = _covariance_eigvals(fraud_features).detach()
+        if clamp_x0 is None:  # adversarial phase might not be enabled; still need clamp bounds
+            mu, sd = fraud_features.mean(dim=0), fraud_features.std(dim=0).clamp(min=1e-3)
+            clamp_x0 = (mu - spec_cfg.get("clamp_std", 3.0) * sd, mu + spec_cfg.get("clamp_std", 3.0) * sd)
+        logger.info(f"Spectral-matching phase enabled: starts at epoch {spec_start_epoch}/{dcfg['epochs']}, "
+                    f"lambda={spec_lambda}")
+
     batch_size = min(dcfg["batch_size"], fraud_features.shape[0])
     log_every = dcfg.get("log_every", 10)
 
     for epoch in range(1, dcfg["epochs"] + 1):
         denoiser.train()
         adversarial_active = adv_enabled and epoch >= adv_start_epoch
+        spectral_active = spec_enabled and epoch >= spec_start_epoch
         if adversarial_active:
             discriminator.train()
         perm = torch.randperm(fraud_features.shape[0], device=device)
-        epoch_denoise_loss, epoch_adv_loss, epoch_disc_loss = 0.0, 0.0, 0.0
+        epoch_denoise_loss, epoch_adv_loss, epoch_disc_loss, epoch_spec_loss = 0.0, 0.0, 0.0, 0.0
         n_batches = 0
         for i in range(0, fraud_features.shape[0], batch_size):
             batch = fraud_features[perm[i:i + batch_size]]
@@ -122,10 +154,13 @@ def run_from_config(config: dict) -> Path:
             x_t = diffusion.q_sample(batch, t, noise)
             pred_noise = denoiser(x_t, t)
             loss_denoise = F.mse_loss(pred_noise, noise)
+            loss_total = loss_denoise
 
-            if adversarial_active:
+            x0_pred = None
+            if adversarial_active or spectral_active:
                 x0_pred = diffusion.predict_x0(x_t, t, pred_noise).clamp(*clamp_x0)
 
+            if adversarial_active:
                 disc_optimizer.zero_grad()
                 d_real = discriminator(batch)
                 d_fake = discriminator(x0_pred.detach())
@@ -136,11 +171,15 @@ def run_from_config(config: dict) -> Path:
 
                 d_fake_for_gen = discriminator(x0_pred)
                 loss_adv = F.binary_cross_entropy_with_logits(d_fake_for_gen, torch.ones_like(d_fake_for_gen))
-                loss_total = loss_denoise + adv_lambda * loss_adv
+                loss_total = loss_total + adv_lambda * loss_adv
                 epoch_adv_loss += loss_adv.item()
                 epoch_disc_loss += loss_disc.item()
-            else:
-                loss_total = loss_denoise
+
+            if spectral_active:
+                fake_eigvals = _covariance_eigvals(x0_pred)
+                loss_spectral = F.mse_loss(fake_eigvals, real_eigvals)
+                loss_total = loss_total + spec_lambda * loss_spectral
+                epoch_spec_loss += loss_spectral.item()
 
             optimizer.zero_grad()
             loss_total.backward()
@@ -151,15 +190,20 @@ def run_from_config(config: dict) -> Path:
         avg_loss = epoch_denoise_loss / max(n_batches, 1)
         avg_adv_loss = epoch_adv_loss / max(n_batches, 1) if adversarial_active else None
         avg_disc_loss = epoch_disc_loss / max(n_batches, 1) if adversarial_active else None
+        avg_spec_loss = epoch_spec_loss / max(n_batches, 1) if spectral_active else None
         wandb.log(
             {"epoch": epoch, "loss_denoise": avg_loss, "loss_adv": avg_adv_loss, "loss_disc": avg_disc_loss,
-             "adversarial_active": adversarial_active},
+             "loss_spectral": avg_spec_loss, "adversarial_active": adversarial_active,
+             "spectral_active": spectral_active},
             step=epoch,
         )
-        if epoch % log_every == 0 or epoch == 1 or epoch == dcfg["epochs"] or epoch == adv_start_epoch:
+        if (epoch % log_every == 0 or epoch == 1 or epoch == dcfg["epochs"]
+                or epoch == adv_start_epoch or epoch == spec_start_epoch):
             msg = f"Diffusion epoch {epoch:4d}/{dcfg['epochs']} | loss_denoise={avg_loss:.4f}"
             if adversarial_active:
                 msg += f" | loss_adv={avg_adv_loss:.4f} | loss_disc={avg_disc_loss:.4f}"
+            if spectral_active:
+                msg += f" | loss_spectral={avg_spec_loss:.4f}"
             logger.info(msg)
 
     out_path = ROOT / dcfg["model_path"]
