@@ -1,0 +1,35 @@
+seed: 42
+
+data:
+  dataset: elliptic
+  raw_dir: data/raw/elliptic/elliptic_bitcoin_dataset
+  processed_path: data/processed/elliptic_graph.pt
+  train_end_step: 34
+  val_end_step: 41
+
+# Same as elliptic_metric_learning.yaml, but with batch-hard triplet mining instead of random
+# sampling -- every epoch, each fraud anchor is trained against its CURRENTLY farthest fraud peer
+# (hardest positive) and CURRENTLY closest legit point (hardest negative), computed over the full
+# train fraud/legit population. Directly targets Run 78's finding: post-break fraud is exactly the
+# "hard positive" case random sampling under-weights (rare, far from most other fraud). 2026-07-21.
+model:
+  name: graphsage_diff
+  hidden_dim: 128
+  num_layers: 2
+  dropout: 0.5
+
+train:
+  lr: 0.001
+  weight_decay: 0.00001
+  epochs: 1000
+  patience: 50
+  device: auto
+
+metric_learning:
+  enabled: true
+  margin: 1.0
+  mining: hard
+
+journal:
+  path: LAB_JOURNAL.md
+  run_name: elliptic_metric_learning_hard_mining
