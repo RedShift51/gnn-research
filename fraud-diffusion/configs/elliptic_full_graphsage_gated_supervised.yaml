@@ -1,0 +1,39 @@
+seed: 42
+
+data:
+  dataset: elliptic
+  raw_dir: data/raw/elliptic/elliptic_bitcoin_dataset
+  processed_path: data/processed/elliptic_graph.pt
+  train_end_step: 34
+  val_end_step: 41
+
+# GraphSAGEGated + label-supervised gate auxiliary loss (loss.gate_auxiliary_weight): the gate is
+# now directly supervised (BCE against y_src==y_dst on known-labeled TRAIN edges) instead of
+# relying solely on the indirect gradient through the classification loss, which Run 59/60 showed
+# doesn't teach it anything useful (4/214 of RF's missed fraud recovered, 38/194 of RF's easy
+# catches LOST). Everything else matches elliptic_full_graphsage_gated.yaml exactly, so any effect
+# is attributable to the auxiliary supervision alone. 2026-07-21 discussion.
+model:
+  name: graphsage_gated
+  hidden_dim: 128
+  num_layers: 2
+  dropout: 0.5
+
+loss:
+  name: focal
+  alpha: 0.25
+  gamma: 2.0
+  gate_auxiliary_weight: 0.5
+
+train:
+  lr: 0.001
+  weight_decay: 0.00001
+  epochs: 1000
+  patience: 50
+  device: auto
+  ema_decay: 0.98
+  ema_start_epoch: 30
+
+journal:
+  path: LAB_JOURNAL.md
+  run_name: elliptic_graphsage_gated_supervised

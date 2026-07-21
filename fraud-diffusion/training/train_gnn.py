@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import wandb
 import yaml
 from torch_geometric.data import Data
@@ -340,6 +341,10 @@ def run_from_config(config: dict, config_path: str, git_commit: str | None = Non
     eval_model = None      # reused each epoch to evaluate EMA weights without touching `model`
 
     criterion = FocalLoss(alpha=config["loss"]["alpha"], gamma=config["loss"]["gamma"])
+    # Auxiliary supervision for GraphSAGEGated's neighbor gate (LAB_JOURNAL.md Run 59/60): direct
+    # BCE against y_src==y_dst on known-labeled TRAIN edges, instead of hoping the gate learns
+    # same-class-ness indirectly through the classification loss alone (confirmed not to work).
+    gate_aux_weight = config["loss"].get("gate_auxiliary_weight", 0.0)
     optimizer = torch.optim.Adam(
         model.parameters(),
         lr=config["train"]["lr"],
@@ -379,6 +384,14 @@ def run_from_config(config: dict, config_path: str, git_commit: str | None = Non
             # val/test-period edges (see data/temporal_edges.py; arXiv 2604.19514).
             logits = model(data.x, data.train_edge_index)
             loss = criterion(logits[data.train_mask], data.y[data.train_mask])
+            if gate_aux_weight > 0 and hasattr(model, "gate_logits"):
+                gate_logits = model.gate_logits(data.x, data.train_edge_index)
+                src, dst = data.train_edge_index[0], data.train_edge_index[1]
+                both_train = data.train_mask[src] & data.train_mask[dst]
+                if both_train.any():
+                    same_class = (data.y[src] == data.y[dst]).float()
+                    gate_loss = F.binary_cross_entropy_with_logits(gate_logits[both_train], same_class[both_train])
+                    loss = loss + gate_aux_weight * gate_loss
             loss.backward()
             optimizer.step()
             loss = loss.item()

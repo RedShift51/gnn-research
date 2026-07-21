@@ -106,6 +106,19 @@ class GraphSAGEGated(nn.Module):
         self.dropout = dropout
         self.classifier = _build_classifier(hidden_dim, classifier_hidden_dim, dropout)
 
+    def gate_logits(self, x: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
+        """Raw (pre-sigmoid) per-edge gate score, exposed separately from embed() so the training
+        loop can add an auxiliary same-class-supervision loss (LAB_JOURNAL.md Run 59/60: the gate
+        showed no real effect when trained only indirectly, through the final classification loss
+        — this lets it be supervised directly against y_src==y_dst on known-labeled training
+        edges instead) without changing embed()'s tensor-only contract (relied on by
+        evaluation/gnn_rf_hybrid.py)."""
+        if self.encoder is not None:
+            x = self.encoder(x)
+        src, dst = edge_index[0], edge_index[1]
+        edge_feat = torch.cat([x[src], x[dst], x[src] - x[dst]], dim=-1)
+        return self.gate_mlp(edge_feat).squeeze(-1)
+
     def embed(self, x: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
         """See GraphSAGE.embed's docstring — same rationale, for the GNN-embeddings+RF hybrid."""
         if self.encoder is not None:
