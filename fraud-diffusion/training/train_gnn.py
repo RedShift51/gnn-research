@@ -282,7 +282,21 @@ def run_from_config(config: dict, config_path: str, git_commit: str | None = Non
             input_nodes=data.test_mask, shuffle=False,
         )
     else:
-        data = data.to(device)
+        # Deliberately NOT data.to(device) (which would move ALL THREE edge_index variants to
+        # GPU at once): data.edge_index (the full graph) is only needed once, for the final
+        # test-time eval after training completes. Since the leakage fix added train_edge_index/
+        # val_edge_index as separate tensors, a blanket .to(device) here now holds all three
+        # resident on GPU throughout training — on PaySim's large graph this regressed a real
+        # CUDA OOM on configs that fit fine before (see LAB_JOURNAL.md). train_edge_index and
+        # val_edge_index ARE used every epoch, so those move now; edge_index moves just-in-time
+        # at the test-eval call site instead.
+        data.x = data.x.to(device)
+        data.y = data.y.to(device)
+        data.train_mask = data.train_mask.to(device)
+        data.val_mask = data.val_mask.to(device)
+        data.test_mask = data.test_mask.to(device)
+        data.train_edge_index = data.train_edge_index.to(device)
+        data.val_edge_index = data.val_edge_index.to(device)
 
     model = build_model(config, in_dim=data.x.shape[1]).to(device)
 
@@ -379,7 +393,9 @@ def run_from_config(config: dict, config_path: str, git_commit: str | None = Non
         test_metrics = evaluate_batched(model, test_loader, device)
     else:
         val_metrics = evaluate(model, data, data.val_mask, device, edge_index=data.val_edge_index)
-        test_metrics = evaluate(model, data, data.test_mask, device, edge_index=data.edge_index)
+        # Moved to GPU just-in-time — see the setup comment above for why this isn't kept
+        # resident throughout training.
+        test_metrics = evaluate(model, data, data.test_mask, device, edge_index=data.edge_index.to(device))
 
     logger.info(f"Best epoch: {best_epoch}")
     logger.info(f"Val:  {val_metrics}")
