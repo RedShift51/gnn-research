@@ -1,9 +1,12 @@
 """Download the PaySim and Elliptic Bitcoin datasets from Kaggle."""
 
+import logging
 import shutil
 import sys
 import zipfile
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 RAW_DIR = Path(__file__).resolve().parent.parent / "data" / "raw"
 TARGET_CSV = RAW_DIR / "paysim.csv"
@@ -39,7 +42,7 @@ def ensure_downloaded() -> Path:
     RAW_DIR.mkdir(parents=True, exist_ok=True)
 
     if TARGET_CSV.exists():
-        print(f"Already present: {TARGET_CSV}")
+        logger.info(f"Already present: {TARGET_CSV}")
         return TARGET_CSV
 
     kaggle_creds = Path.home() / ".kaggle" / "kaggle.json"
@@ -50,7 +53,7 @@ def ensure_downloaded() -> Path:
 
     api = KaggleApi()
     api.authenticate()
-    print(f"Downloading {KAGGLE_DATASET} ...")
+    logger.info(f"Downloading {KAGGLE_DATASET} ...")
     api.dataset_download_files(KAGGLE_DATASET, path=str(RAW_DIR), unzip=True)
 
     csvs = list(RAW_DIR.glob("*.csv"))
@@ -60,7 +63,7 @@ def ensure_downloaded() -> Path:
     if csvs[0] != TARGET_CSV:
         shutil.move(str(csvs[0]), str(TARGET_CSV))
 
-    print(f"Saved: {TARGET_CSV}")
+    logger.info(f"Saved: {TARGET_CSV}")
     return TARGET_CSV
 
 
@@ -71,7 +74,7 @@ def ensure_downloaded_elliptic() -> Path:
     ELLIPTIC_RAW_DIR.mkdir(parents=True, exist_ok=True)
 
     if ELLIPTIC_FEATURES_CSV.exists():
-        print(f"Already present: {ELLIPTIC_NESTED_DIR}")
+        logger.info(f"Already present: {ELLIPTIC_NESTED_DIR}")
         return ELLIPTIC_NESTED_DIR
 
     kaggle_creds = Path.home() / ".kaggle" / "kaggle.json"
@@ -87,7 +90,7 @@ def ensure_downloaded_elliptic() -> Path:
 
     api = KaggleApi()
     api.authenticate()
-    print(f"Downloading {ELLIPTIC_KAGGLE_DATASET} ...")
+    logger.info(f"Downloading {ELLIPTIC_KAGGLE_DATASET} ...")
     api.dataset_download_files(ELLIPTIC_KAGGLE_DATASET, path=str(ELLIPTIC_RAW_DIR), unzip=True)
 
     if not ELLIPTIC_FEATURES_CSV.exists():
@@ -97,15 +100,16 @@ def ensure_downloaded_elliptic() -> Path:
             raise RuntimeError("Download finished but elliptic_txs_features.csv not found anywhere.")
         return found[0].parent
 
-    print(f"Saved to: {ELLIPTIC_NESTED_DIR}")
+    logger.info(f"Saved to: {ELLIPTIC_NESTED_DIR}")
     return ELLIPTIC_NESTED_DIR
 
 
 def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     try:
         ensure_downloaded()
     except RuntimeError as e:
-        print(e)
+        logger.error(e)
         sys.exit(1)
 
 

@@ -8,6 +8,7 @@ Split  = temporal (sorted by `step`), not random.
 """
 
 import argparse
+import logging
 from pathlib import Path
 
 import numpy as np
@@ -18,6 +19,7 @@ from sklearn.preprocessing import StandardScaler
 from torch_geometric.data import Data
 
 ROOT = Path(__file__).resolve().parent.parent
+logger = logging.getLogger(__name__)
 
 
 def load_config(path: str) -> dict:
@@ -127,10 +129,10 @@ def temporal_split_masks(n: int, train_frac: float, val_frac: float) -> tuple:
 def run_from_config(config: dict) -> Path:
     """Run the full preprocess pipeline for an already-loaded config, return the output path.
     Reused by the CLI entrypoint (main, below) and by runpod/handler.py for serverless invocation."""
-    # See training/train_gnn.py's matching print — visibility into what's actually running at
+    # See training/train_gnn.py's matching log line — visibility into what's actually running at
     # every stage, not just at train time, in case preprocessing itself picks up a stale/wrong
     # config (e.g. a stale worker's git checkout missing a newly-added data.subsample_size value).
-    print(f"paysim_preprocess config: {config}")
+    logger.info(f"paysim_preprocess config: {config}")
 
     data_cfg = config["data"]
     seed = config["seed"]
@@ -140,16 +142,16 @@ def run_from_config(config: dict) -> Path:
     df = df[df["type"].isin(data_cfg["fraud_types"])].reset_index(drop=True)
 
     df = stratified_subsample(df, data_cfg["subsample_size"], seed)
-    print(f"Subsampled to {len(df)} rows ({df['isFraud'].sum()} fraud, "
-          f"{df['isFraud'].mean():.4%} rate)")
+    logger.info(f"Subsampled to {len(df)} rows ({df['isFraud'].sum()} fraud, "
+                f"{df['isFraud'].mean():.4%} rate)")
 
     n = len(df)
     train_mask, val_mask, test_mask = temporal_split_masks(
         n, data_cfg["train_frac"], data_cfg["val_frac"]
     )
-    print(f"Split sizes: train={train_mask.sum()} val={val_mask.sum()} test={test_mask.sum()}")
-    print(f"Fraud per split: train={df['isFraud'][train_mask].sum()} "
-          f"val={df['isFraud'][val_mask].sum()} test={df['isFraud'][test_mask].sum()}")
+    logger.info(f"Split sizes: train={train_mask.sum()} val={val_mask.sum()} test={test_mask.sum()}")
+    logger.info(f"Fraud per split: train={df['isFraud'][train_mask].sum()} "
+                f"val={df['isFraud'][val_mask].sum()} test={df['isFraud'][test_mask].sum()}")
 
     features = build_node_features(df)
 
@@ -158,7 +160,7 @@ def run_from_config(config: dict) -> Path:
     features = scaler.transform(features).astype(np.float32)
 
     edge_index = build_edges(df, data_cfg["max_node_degree"])
-    print(f"Built {edge_index.shape[1]} directed edges over {n} nodes")
+    logger.info(f"Built {edge_index.shape[1]} directed edges over {n} nodes")
 
     y = df["isFraud"].to_numpy(dtype=np.int64)
 
@@ -174,11 +176,12 @@ def run_from_config(config: dict) -> Path:
     out_path = ROOT / data_cfg["processed_path"]
     out_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(data, out_path)
-    print(f"Saved graph to {out_path}")
+    logger.info(f"Saved graph to {out_path}")
     return out_path
 
 
 def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
     args = parser.parse_args()

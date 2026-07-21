@@ -3,6 +3,7 @@ synthetic fraud augmentation of the training graph — see data/augment_graph.py
 stage. Reused by the CLI entrypoint (main, below) and by serverless/handler.py."""
 
 import argparse
+import logging
 from pathlib import Path
 
 import torch
@@ -11,6 +12,7 @@ import yaml
 from models.diffusion.tabddpm import GaussianDiffusion, TabDDPMDenoiser
 
 ROOT = Path(__file__).resolve().parent.parent
+logger = logging.getLogger(__name__)
 
 
 def load_config(path: str) -> dict:
@@ -27,10 +29,10 @@ def pick_device() -> torch.device:
 
 
 def run_from_config(config: dict) -> Path:
-    print(f"train_diffusion config: {config}")
+    logger.info(f"train_diffusion config: {config}")
     dcfg = config["diffusion"]
     device = pick_device()
-    print(f"Using device: {device}")
+    logger.info(f"Using device: {device}")
 
     data = torch.load(ROOT / config["data"]["processed_path"], weights_only=False)
 
@@ -38,8 +40,8 @@ def run_from_config(config: dict) -> Path:
     # information into the generator that later augments the training set.
     fraud_mask = data.train_mask & (data.y == 1)
     fraud_features = data.x[fraud_mask].to(device)
-    print(f"Training diffusion model on {fraud_features.shape[0]} fraud node feature vectors "
-          f"(dim={fraud_features.shape[1]}) from the TRAIN split")
+    logger.info(f"Training diffusion model on {fraud_features.shape[0]} fraud node feature vectors "
+                f"(dim={fraud_features.shape[1]}) from the TRAIN split")
 
     diffusion = GaussianDiffusion(num_timesteps=dcfg["num_timesteps"], device=device)
     denoiser = TabDDPMDenoiser(
@@ -66,7 +68,7 @@ def run_from_config(config: dict) -> Path:
 
         avg_loss = epoch_loss / max(n_batches, 1)
         if epoch % log_every == 0 or epoch == 1 or epoch == dcfg["epochs"]:
-            print(f"Diffusion epoch {epoch:4d}/{dcfg['epochs']} | loss={avg_loss:.4f}")
+            logger.info(f"Diffusion epoch {epoch:4d}/{dcfg['epochs']} | loss={avg_loss:.4f}")
 
     out_path = ROOT / dcfg["model_path"]
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -76,11 +78,12 @@ def run_from_config(config: dict) -> Path:
         "hidden_dim": dcfg["hidden_dim"],
         "num_timesteps": dcfg["num_timesteps"],
     }, out_path)
-    print(f"Saved diffusion model to {out_path}")
+    logger.info(f"Saved diffusion model to {out_path}")
     return out_path
 
 
 def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
     args = parser.parse_args()

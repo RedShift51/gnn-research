@@ -1,4 +1,5 @@
 import argparse
+import logging
 import os
 import random
 from datetime import date
@@ -18,6 +19,7 @@ from training.ema import EMA
 from training.losses import FocalLoss
 
 ROOT = Path(__file__).resolve().parent.parent
+logger = logging.getLogger(__name__)
 
 
 def load_config(path: str) -> dict:
@@ -177,7 +179,7 @@ AUPRC={test_metrics['auprc']:.4f}, G-mean={test_metrics['g_mean']:.4f}
 """
     with open(journal_path, "a") as f:
         f.write(entry)
-    print(f"Appended run {run_id} to {journal_path}")
+    logger.info(f"Appended run {run_id} to {journal_path}")
 
 
 def init_wandb(config: dict, config_path: str):
@@ -213,15 +215,15 @@ def run_from_config(config: dict, config_path: str, git_commit: str | None = Non
     # worker silently running the wrong config (e.g. defaulting away from an unrecognized
     # config_dict key) is otherwise invisible until you notice the results look off. Cheap
     # insurance against exactly that (see LAB_JOURNAL.md's caught 40%-oversample incident).
-    print(f"Config path/label: {config_path}")
-    print(f"Full config: {config}")
+    logger.info(f"Config path/label: {config_path}")
+    logger.info(f"Full config: {config}")
 
     wandb_run = init_wandb(config, config_path)
     if git_commit is not None:
         wandb_run.summary["worker_git_commit"] = git_commit
 
     device = pick_device(config["train"]["device"])
-    print(f"Using device: {device}")
+    logger.info(f"Using device: {device}")
 
     data = torch.load(ROOT / config["data"]["processed_path"], weights_only=False)
     wandb_run.summary["n_nodes"] = data.num_nodes
@@ -318,7 +320,7 @@ def run_from_config(config: dict, config_path: str, git_commit: str | None = Non
         else:
             epochs_since_improve += 1
 
-        print(f"Epoch {epoch:3d} | loss={loss:.4f} | val_auc_roc={val_metrics['auc_roc']:.4f} | val_f1_macro={val_metrics['f1_macro']:.4f}")
+        logger.info(f"Epoch {epoch:3d} | loss={loss:.4f} | val_auc_roc={val_metrics['auc_roc']:.4f} | val_f1_macro={val_metrics['f1_macro']:.4f}")
         wandb.log({"epoch": epoch, "train_loss": loss, "val": val_metrics}, step=epoch)
 
         # Guard against stopping before EMA ever gets a chance to run: without this, a plateau in
@@ -326,7 +328,7 @@ def run_from_config(config: dict, config_path: str, git_commit: str | None = Non
         # — best_epoch=7, ema_start_epoch=15, patience=8) fires early stopping before EMA engages
         # even once, so every "evaluated" checkpoint that whole run was the raw model.
         if epochs_since_improve >= patience and (ema_decay <= 0 or epoch > ema_start_epoch):
-            print(f"Early stopping at epoch {epoch} (best epoch {best_epoch})")
+            logger.info(f"Early stopping at epoch {epoch} (best epoch {best_epoch})")
             break
 
     model.load_state_dict(best_state)
@@ -337,9 +339,9 @@ def run_from_config(config: dict, config_path: str, git_commit: str | None = Non
         val_metrics = evaluate(model, data, data.val_mask, device)
         test_metrics = evaluate(model, data, data.test_mask, device)
 
-    print(f"Best epoch: {best_epoch}")
-    print(f"Val:  {val_metrics}")
-    print(f"Test: {test_metrics}")
+    logger.info(f"Best epoch: {best_epoch}")
+    logger.info(f"Val:  {val_metrics}")
+    logger.info(f"Test: {test_metrics}")
 
     wandb.log({"best_epoch": best_epoch, "final_val": val_metrics, "final_test": test_metrics})
     wandb_run.summary["best_epoch"] = best_epoch
@@ -383,6 +385,7 @@ def run_from_config(config: dict, config_path: str, git_commit: str | None = Non
 
 
 def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
     args = parser.parse_args()

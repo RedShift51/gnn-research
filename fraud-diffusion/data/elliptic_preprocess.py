@@ -14,6 +14,7 @@ presence, class distribution, step range) rather than assumed from memory.
 """
 
 import argparse
+import logging
 from pathlib import Path
 
 import numpy as np
@@ -25,6 +26,7 @@ from torch_geometric.data import Data
 
 ROOT = Path(__file__).resolve().parent.parent
 N_FEATURES = 165
+logger = logging.getLogger(__name__)
 
 
 def load_config(path: str) -> dict:
@@ -33,7 +35,7 @@ def load_config(path: str) -> dict:
 
 
 def run_from_config(config: dict) -> Path:
-    print(f"elliptic_preprocess config: {config}")
+    logger.info(f"elliptic_preprocess config: {config}")
     data_cfg = config["data"]
     raw_dir = ROOT / data_cfg["raw_dir"]
 
@@ -61,10 +63,10 @@ def run_from_config(config: dict) -> Path:
     val_mask = (step > train_end) & (step <= val_end) & known
     test_mask = (step > val_end) & known
 
-    print(f"Nodes: {n} ({known.sum()} with known label, {n - known.sum()} unknown)")
-    print(f"Split sizes: train={train_mask.sum()} val={val_mask.sum()} test={test_mask.sum()}")
-    print(f"Fraud per split: train={df['y'].to_numpy()[train_mask].sum()} "
-          f"val={df['y'].to_numpy()[val_mask].sum()} test={df['y'].to_numpy()[test_mask].sum()}")
+    logger.info(f"Nodes: {n} ({known.sum()} with known label, {n - known.sum()} unknown)")
+    logger.info(f"Split sizes: train={train_mask.sum()} val={val_mask.sum()} test={test_mask.sum()}")
+    logger.info(f"Fraud per split: train={df['y'].to_numpy()[train_mask].sum()} "
+                f"val={df['y'].to_numpy()[val_mask].sum()} test={df['y'].to_numpy()[test_mask].sum()}")
 
     feature_cols = [f"f{i}" for i in range(N_FEATURES)]
     x = df[feature_cols].to_numpy(dtype=np.float32)
@@ -78,7 +80,7 @@ def run_from_config(config: dict) -> Path:
     valid = src.notna() & dst.notna()
     dropped = len(edges) - valid.sum()
     if dropped:
-        print(f"Dropped {dropped} edges referencing unknown txIds")
+        logger.info(f"Dropped {dropped} edges referencing unknown txIds")
     edge_index = np.stack([src[valid].to_numpy(dtype=np.int64), dst[valid].to_numpy(dtype=np.int64)])
     edge_index = np.concatenate([edge_index, edge_index[::-1]], axis=1)  # undirected
     # .T/slicing tricks like this leave a non-contiguous array — pyg-lib's NeighborLoader sampler
@@ -100,11 +102,12 @@ def run_from_config(config: dict) -> Path:
     out_path = ROOT / data_cfg["processed_path"]
     out_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(data, out_path)
-    print(f"Saved graph to {out_path} ({data.num_nodes} nodes, {edge_index.shape[1]} directed edges)")
+    logger.info(f"Saved graph to {out_path} ({data.num_nodes} nodes, {edge_index.shape[1]} directed edges)")
     return out_path
 
 
 def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
     args = parser.parse_args()

@@ -20,9 +20,12 @@ Usage:
 import argparse
 import itertools
 import json
+import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from infra.runpod_serverless import invoke, sweep_config
+
+logger = logging.getLogger(__name__)
 
 
 def _default_run_name(base_config_path: str, point: dict) -> str:
@@ -53,7 +56,7 @@ def build_grid(base_config_path: str, param_grid: dict, run_name_fn=None) -> lis
 def run_sweep(endpoint_id: str, base_config_path: str, param_grid: dict,
               max_workers: int = 4, timeout: int = 3600, preprocess: bool = True) -> dict:
     jobs = build_grid(base_config_path, param_grid)
-    print(f"Dispatching {len(jobs)} jobs ({', '.join(param_grid.keys())} grid) to endpoint {endpoint_id}...")
+    logger.info(f"Dispatching {len(jobs)} jobs ({', '.join(param_grid.keys())} grid) to endpoint {endpoint_id}...")
 
     results = {}
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
@@ -68,11 +71,11 @@ def run_sweep(endpoint_id: str, base_config_path: str, param_grid: dict,
                 result = future.result()
                 results[run_name] = {"point": point, "output": result.get("output", result)}
                 test = results[run_name]["output"].get("test", {})
-                print(f"[{run_name}] done — point={point} "
-                      f"test_f1={test.get('f1_macro')} test_auc={test.get('auc_roc')}")
+                logger.info(f"[{run_name}] done — point={point} "
+                            f"test_f1={test.get('f1_macro')} test_auc={test.get('auc_roc')}")
             except Exception as e:
                 results[run_name] = {"point": point, "error": str(e)}
-                print(f"[{run_name}] FAILED — point={point}: {e}")
+                logger.error(f"[{run_name}] FAILED — point={point}: {e}")
     return results
 
 
@@ -93,6 +96,7 @@ def print_summary(results: dict) -> None:
 
 
 def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     parser = argparse.ArgumentParser()
     parser.add_argument("--endpoint-id", required=True)
     parser.add_argument("--base-config", required=True)

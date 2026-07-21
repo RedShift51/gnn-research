@@ -18,12 +18,15 @@ Usage (run from the fraud-diffusion/ project root, after `source infra/load_secr
 
 import argparse
 import copy
+import logging
 import os
 import subprocess
 import time
 
 import runpod
 import yaml
+
+logger = logging.getLogger(__name__)
 
 IMAGE_NAME = "fraud-diffusion-serverless"
 TEMPLATE_NAME = "fraud-diffusion-serverless"
@@ -67,7 +70,7 @@ def build_and_push_image(tag: str = "latest") -> str:
         check=True,
     )
     subprocess.run(["docker", "push", image_ref], check=True)
-    print(f"Pushed {image_ref}")
+    logger.info(f"Pushed {image_ref}")
     return image_ref
 
 
@@ -102,7 +105,7 @@ def deploy(tag: str = "latest", gpu_ids: str = "ADA_24") -> str:
         username=os.environ["GITHUB_USERNAME"],
         password=os.environ["GHCR_TOKEN"],
     )
-    print("Registry auth:", registry_auth)
+    logger.info(f"Registry auth: {registry_auth}")
 
     template = runpod.create_template(
         name=f"{TEMPLATE_NAME}-{int(time.time())}",
@@ -122,7 +125,7 @@ def deploy(tag: str = "latest", gpu_ids: str = "ADA_24") -> str:
             "WANDB_API_KEY": os.environ.get("WANDB_API_KEY", ""),
         },
     )
-    print("Template:", template)
+    logger.info(f"Template: {template}")
 
     endpoint = runpod.create_endpoint(
         name=ENDPOINT_NAME,
@@ -133,7 +136,7 @@ def deploy(tag: str = "latest", gpu_ids: str = "ADA_24") -> str:
                             # (now-stale) endpoint already reserved 1, leaving 4 for this one
         idle_timeout=30,
     )
-    print("Endpoint:", endpoint)
+    logger.info(f"Endpoint: {endpoint}")
     return endpoint["id"]
 
 
@@ -147,6 +150,7 @@ def invoke(endpoint_id: str, job_input: dict, timeout: int = 3600) -> dict:
 
 
 def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -173,6 +177,8 @@ def main() -> None:
             args.endpoint_id,
             {"config": args.config, "preprocess": not args.no_preprocess},
         )
+        # Deliberately print(), not logger.info() — this is the command's actual output (the job
+        # result), not a status/progress message, and may be piped/captured by a caller.
         print(result)
 
 

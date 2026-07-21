@@ -3,6 +3,7 @@
 stay exactly as they were, so evaluation always measures generalization to real data."""
 
 import argparse
+import logging
 from pathlib import Path
 
 import torch
@@ -12,6 +13,7 @@ from torch_geometric.data import Data
 from models.diffusion.tabddpm import GaussianDiffusion, TabDDPMDenoiser
 
 ROOT = Path(__file__).resolve().parent.parent
+logger = logging.getLogger(__name__)
 
 
 def load_config(path: str) -> dict:
@@ -28,7 +30,7 @@ def pick_device() -> torch.device:
 
 
 def run_from_config(config: dict) -> Path:
-    print(f"augment_graph config: {config}")
+    logger.info(f"augment_graph config: {config}")
     acfg = config["augment"]
     device = pick_device()
 
@@ -66,9 +68,9 @@ def run_from_config(config: dict) -> Path:
     else:
         raise ValueError(f"Unknown augment.sampler: {sampler!r} (expected 'ddim' or 'ddpm')")
     synthetic_x = synthetic_x.cpu()
-    print(f"Generated {n_synthetic} synthetic fraud feature vectors via {sampler} sampling "
-          f"(mean={synthetic_x.mean().item():.3f}, std={synthetic_x.std().item():.3f}, "
-          f"clamp_x0={'on, ' + str(n_clamp_std) + 'std' if clamp_x0 is not None else 'off'})")
+    logger.info(f"Generated {n_synthetic} synthetic fraud feature vectors via {sampler} sampling "
+                f"(mean={synthetic_x.mean().item():.3f}, std={synthetic_x.std().item():.3f}, "
+                f"clamp_x0={'on, ' + str(n_clamp_std) + 'std' if clamp_x0 is not None else 'off'})")
 
     n_original = data.num_nodes
     new_indices = torch.arange(n_original, n_original + n_synthetic)
@@ -118,13 +120,14 @@ def run_from_config(config: dict) -> Path:
     out_path = ROOT / config["data"]["augmented_processed_path"]
     out_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(augmented_data, out_path)
-    print(f"Saved augmented graph ({n_original} -> {augmented_data.num_nodes} nodes, "
-          f"+{n_synthetic} synthetic fraud, {augmented_edge_index.shape[1]} directed edges) "
-          f"to {out_path}")
+    logger.info(f"Saved augmented graph ({n_original} -> {augmented_data.num_nodes} nodes, "
+                f"+{n_synthetic} synthetic fraud, {augmented_edge_index.shape[1]} directed edges) "
+                f"to {out_path}")
     return out_path
 
 
 def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
     args = parser.parse_args()

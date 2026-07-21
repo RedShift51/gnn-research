@@ -32,11 +32,14 @@ Usage:
 import argparse
 import copy
 import json
+import logging
 
 import wandb
 import yaml
 
 from infra.runpod_serverless import invoke
+
+logger = logging.getLogger(__name__)
 
 
 def _apply_point(base_config_path: str, point: dict) -> dict:
@@ -57,7 +60,7 @@ def create_sweep(project: str, method: str, metric: str, goal: str, params: dict
         "parameters": params,
     }
     sweep_id = wandb.sweep(sweep_definition, project=project)
-    print(f"Created sweep {sweep_id} (project={project}, method={method}, metric={metric}/{goal})")
+    logger.info(f"Created sweep {sweep_id} (project={project}, method={method}, metric={metric}/{goal})")
     return sweep_id
 
 
@@ -68,7 +71,7 @@ def run_agent(sweep_id: str, project: str, endpoint_id: str, base_config_path: s
         point = dict(run.config)
         config = _apply_point(base_config_path, point)
         run.name = "sweep_" + "_".join(f"{k.split('.')[-1]}{v}" for k, v in point.items())
-        print(f"[{run.name}] dispatching to RunPod with point={point}")
+        logger.info(f"[{run.name}] dispatching to RunPod with point={point}")
 
         result = invoke(endpoint_id, {"config_dict": config, "preprocess": True}, timeout)
         output = result.get("output", result)
@@ -79,12 +82,13 @@ def run_agent(sweep_id: str, project: str, endpoint_id: str, base_config_path: s
         run.log({f"val_{k}": v for k, v in val_metrics.items()})
         for k, v in test_metrics.items():
             run.summary[f"test_{k}"] = v
-        print(f"[{run.name}] done — test={test_metrics}, val={val_metrics}")
+        logger.info(f"[{run.name}] done — test={test_metrics}, val={val_metrics}")
 
     wandb.agent(sweep_id, function=train_one, project=project, count=count)
 
 
 def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command", required=True)
 

@@ -22,6 +22,7 @@ genuinely part of the repo (checked in, reused across runs); "config_dict" is fo
 where committing a new YAML file just to trigger a rebuild would be pure overhead.
 """
 
+import logging
 import os
 import subprocess
 
@@ -31,6 +32,12 @@ from data.download import ensure_downloaded, ensure_downloaded_elliptic
 from data.elliptic_preprocess import run_from_config as elliptic_preprocess_run
 from data.paysim_preprocess import load_config, run_from_config as paysim_preprocess_run
 from training.train_gnn import run_from_config as train_run
+
+# Configured once at worker-process import time (not inside handler()) — this process stays
+# alive across many jobs (see _git_pull_latest()'s docstring), so basicConfig here covers every
+# job the worker ever handles, not just the first.
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logger = logging.getLogger(__name__)
 
 
 def _git_pull_latest() -> str:
@@ -47,19 +54,19 @@ def _git_pull_latest() -> str:
         return subprocess.run(["git", "-C", "/root/repo", "rev-parse", "HEAD"],
                                check=True, capture_output=True, text=True).stdout.strip()
     except Exception as e:
-        print(f"git pull at job start failed (continuing with existing checkout): {e}")
+        logger.warning(f"git pull at job start failed (continuing with existing checkout): {e}")
         return os.environ.get("GIT_COMMIT_SHA", "unknown")
 
 
 def handler(job):
     commit_sha = _git_pull_latest()
     job_input = job.get("input", {})
-    # Print the raw job input FIRST, before any resolution/defaulting logic runs — this is the
+    # Log the raw job input FIRST, before any resolution/defaulting logic runs — this is the
     # earliest possible point to catch a wrong/stale-worker misconfiguration (see LAB_JOURNAL.md's
     # caught 40%-oversample incident, where a stale worker silently ignored config_dict and ran a
     # completely different experiment with no error).
-    print(f"Received job_input: {job_input}")
-    print(f"Worker git commit (after per-job pull): {commit_sha}")
+    logger.info(f"Received job_input: {job_input}")
+    logger.info(f"Worker git commit (after per-job pull): {commit_sha}")
 
     config_dict = job_input.get("config_dict")
     do_preprocess = job_input.get("preprocess", True)
@@ -74,8 +81,8 @@ def handler(job):
         config = load_config(config_path)
         config_label = config_path
 
-    print(f"Resolved config_label: {config_label}")
-    print(f"Resolved config: {config}")
+    logger.info(f"Resolved config_label: {config_label}")
+    logger.info(f"Resolved config: {config}")
 
     dataset = config.get("data", {}).get("dataset", "paysim")
     if do_preprocess:
@@ -98,11 +105,11 @@ def handler(job):
         from data.augment_graph import run_from_config as augment_run
         from training.train_diffusion import run_from_config as diffusion_train_run
 
-        print("config.diffusion present — training TabDDPM + augmenting graph before GNN training")
+        logger.info("config.diffusion present — training TabDDPM + augmenting graph before GNN training")
         diffusion_train_run(config)
         augment_run(config)
         config["data"]["processed_path"] = config["data"]["augmented_processed_path"]
-        print(f"GNN training will use the augmented graph: {config['data']['processed_path']}")
+        logger.info(f"GNN training will use the augmented graph: {config['data']['processed_path']}")
 
     result = train_run(config, config_label, git_commit=commit_sha)
     # In the returned output (not just logs) so a stale worker is detectable from the job status
