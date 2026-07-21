@@ -79,7 +79,13 @@ class GaussianDiffusion:
 
     @torch.no_grad()
     def ddpm_sample(self, denoiser: nn.Module, n_samples: int, feature_dim: int,
-                     device: torch.device) -> torch.Tensor:
+                     device: torch.device, clamp_x0: tuple[float, float] | None = None) -> torch.Tensor:
+        """clamp_x0, if given, clips the predicted x0 at every reverse step to (min, max) — a
+        standard DDPM safeguard against reverse-process error compounding over many steps. Without
+        it, a slightly-off prediction early in the chain drifts further out-of-distribution each
+        subsequent step instead of being corrected (observed on Elliptic's 165-dim features: fully
+        trained 1000-epoch model still produced samples with std~80-110 vs real fraud's std~0.56 —
+        see LAB_JOURNAL.md Run 33/34)."""
         denoiser.eval()
         x = torch.randn(n_samples, feature_dim, device=device)
         for t_step in reversed(range(self.num_timesteps)):
@@ -88,8 +94,16 @@ class GaussianDiffusion:
             alpha = self.alphas[t_step]
             alpha_cumprod = self.alphas_cumprod[t_step]
             beta = self.betas[t_step]
-            coef = beta / torch.sqrt(1 - alpha_cumprod)
-            mean = (1 / torch.sqrt(alpha)) * (x - coef * pred_noise)
+
+            if clamp_x0 is not None:
+                x0_pred = (x - torch.sqrt(1 - alpha_cumprod) * pred_noise) / torch.sqrt(alpha_cumprod)
+                x0_pred = x0_pred.clamp(*clamp_x0)
+                mean = (torch.sqrt(alpha) * (1 - alpha_cumprod / alpha) * x
+                        + torch.sqrt(alpha_cumprod / alpha) * beta * x0_pred) / (1 - alpha_cumprod)
+            else:
+                coef = beta / torch.sqrt(1 - alpha_cumprod)
+                mean = (1 / torch.sqrt(alpha)) * (x - coef * pred_noise)
+
             if t_step > 0:
                 x = mean + torch.sqrt(beta) * torch.randn_like(x)
             else:
@@ -98,8 +112,10 @@ class GaussianDiffusion:
 
     @torch.no_grad()
     def ddim_sample(self, denoiser: nn.Module, n_samples: int, feature_dim: int,
-                     device: torch.device, ddim_steps: int = 50) -> torch.Tensor:
-        """Deterministic (eta=0) DDIM sampling — far fewer forward passes than full DDPM."""
+                     device: torch.device, ddim_steps: int = 50,
+                     clamp_x0: tuple[float, float] | None = None) -> torch.Tensor:
+        """Deterministic (eta=0) DDIM sampling — far fewer forward passes than full DDPM.
+        clamp_x0: see ddpm_sample's docstring."""
         denoiser.eval()
         step_indices = torch.linspace(0, self.num_timesteps - 1, ddim_steps, device=device).long()
         step_indices = torch.flip(step_indices, dims=[0])
@@ -110,6 +126,8 @@ class GaussianDiffusion:
             pred_noise = denoiser(x, t)
             alpha_cumprod_t = self.alphas_cumprod[t_step]
             x0_pred = (x - torch.sqrt(1 - alpha_cumprod_t) * pred_noise) / torch.sqrt(alpha_cumprod_t)
+            if clamp_x0 is not None:
+                x0_pred = x0_pred.clamp(*clamp_x0)
 
             if i + 1 < len(step_indices):
                 alpha_cumprod_prev = self.alphas_cumprod[step_indices[i + 1]]

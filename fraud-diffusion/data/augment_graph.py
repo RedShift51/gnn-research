@@ -42,17 +42,33 @@ def run_from_config(config: dict) -> Path:
 
     n_synthetic = acfg["n_synthetic"]
     sampler = acfg.get("sampler", "ddim")
+
+    # Per-feature clamp of the predicted x0 at every reverse step, bounded to real fraud train
+    # features' own mean +/- 3*std. Without this, reverse-process errors compound over many steps
+    # and the sampled features explode in scale (observed on Elliptic: fully-trained 1000-epoch
+    # model produced std~78-110 vs real fraud's std~0.56, a ~150x blowup — see LAB_JOURNAL.md
+    # Run 33/34). Real fraud-only TRAIN features are the reference distribution, matching what the
+    # denoiser was actually trained on.
+    clamp_x0 = None
+    if acfg.get("clamp_synthetic", True):
+        real_fraud_x = data.x[data.train_mask & (data.y == 1)]
+        mu, sd = real_fraud_x.mean(dim=0), real_fraud_x.std(dim=0).clamp(min=1e-3)
+        n_clamp_std = acfg.get("clamp_std", 3.0)
+        clamp_x0 = ((mu - n_clamp_std * sd).to(device), (mu + n_clamp_std * sd).to(device))
+
     if sampler == "ddim":
         synthetic_x = diffusion.ddim_sample(
-            denoiser, n_synthetic, ckpt["feature_dim"], device, ddim_steps=acfg.get("ddim_steps", 50),
+            denoiser, n_synthetic, ckpt["feature_dim"], device,
+            ddim_steps=acfg.get("ddim_steps", 50), clamp_x0=clamp_x0,
         )
     elif sampler == "ddpm":
-        synthetic_x = diffusion.ddpm_sample(denoiser, n_synthetic, ckpt["feature_dim"], device)
+        synthetic_x = diffusion.ddpm_sample(denoiser, n_synthetic, ckpt["feature_dim"], device, clamp_x0=clamp_x0)
     else:
         raise ValueError(f"Unknown augment.sampler: {sampler!r} (expected 'ddim' or 'ddpm')")
     synthetic_x = synthetic_x.cpu()
     print(f"Generated {n_synthetic} synthetic fraud feature vectors via {sampler} sampling "
-          f"(mean={synthetic_x.mean().item():.3f}, std={synthetic_x.std().item():.3f})")
+          f"(mean={synthetic_x.mean().item():.3f}, std={synthetic_x.std().item():.3f}, "
+          f"clamp_x0={'on, ' + str(n_clamp_std) + 'std' if clamp_x0 is not None else 'off'})")
 
     n_original = data.num_nodes
     new_indices = torch.arange(n_original, n_original + n_synthetic)

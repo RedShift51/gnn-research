@@ -117,6 +117,9 @@ def deploy(tag: str = "latest", gpu_ids: str = "ADA_24") -> str:
             # of baking application code into the image (see Dockerfile) — code/config changes
             # take effect on the next worker spin-up with no rebuild.
             "GITHUB_REPO_TOKEN": os.environ.get("GITHUB_REPO_TOKEN", ""),
+            # train_gnn.py's init_wandb() auto-disables (no hang, no crash) when this is absent —
+            # only set it if you want serverless runs to actually log to wandb.
+            "WANDB_API_KEY": os.environ.get("WANDB_API_KEY", ""),
         },
     )
     print("Template:", template)

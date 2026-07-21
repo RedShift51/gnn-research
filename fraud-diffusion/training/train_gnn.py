@@ -1,4 +1,5 @@
 import argparse
+import os
 import random
 from datetime import date
 from pathlib import Path
@@ -6,6 +7,7 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn as nn
+import wandb
 import yaml
 from torch_geometric.loader import NeighborLoader
 
@@ -178,6 +180,27 @@ AUPRC={test_metrics['auprc']:.4f}, G-mean={test_metrics['g_mean']:.4f}
     print(f"Appended run {run_id} to {journal_path}")
 
 
+def init_wandb(config: dict, config_path: str):
+    """Opt-out-by-default: logs to wandb whenever WANDB_API_KEY is present in the environment
+    (local shell via infra/load_secrets.sh, or the serverless container's template env), falls
+    back to a disabled no-op run otherwise so training never hangs waiting on an interactive
+    login prompt (there's no stdin inside a RunPod worker). config["wandb"]["enabled"]=False
+    overrides either way, for quick local smoke tests you don't want cluttering the project."""
+    wcfg = config.get("wandb", {})
+    if not wcfg.get("enabled", True):
+        return wandb.init(mode="disabled")
+    mode = wcfg.get("mode") or ("online" if os.environ.get("WANDB_API_KEY") else "disabled")
+    run_name = config.get("journal", {}).get("run_name", config_path)
+    return wandb.init(
+        project=wcfg.get("project", "fraud-diffusion"),
+        name=run_name,
+        group=config["data"].get("dataset", "paysim"),
+        config=config,
+        mode=mode,
+        reinit=True,
+    )
+
+
 def run_from_config(config: dict, config_path: str) -> dict:
     """Run the full train+eval pipeline for an already-loaded config. Reused by the CLI
     entrypoint (main, below) and by runpod/handler.py for serverless invocation."""
@@ -189,6 +212,8 @@ def run_from_config(config: dict, config_path: str) -> dict:
     # insurance against exactly that (see LAB_JOURNAL.md's caught 40%-oversample incident).
     print(f"Config path/label: {config_path}")
     print(f"Full config: {config}")
+
+    wandb_run = init_wandb(config, config_path)
 
     device = pick_device(config["train"]["device"])
     print(f"Using device: {device}")
@@ -287,6 +312,7 @@ def run_from_config(config: dict, config_path: str) -> dict:
             epochs_since_improve += 1
 
         print(f"Epoch {epoch:3d} | loss={loss:.4f} | val_auc_roc={val_metrics['auc_roc']:.4f} | val_f1_macro={val_metrics['f1_macro']:.4f}")
+        wandb.log({"epoch": epoch, "train_loss": loss, "val": val_metrics}, step=epoch)
 
         # Guard against stopping before EMA ever gets a chance to run: without this, a plateau in
         # the raw model right around ema_start_epoch (exactly what happened in LAB_JOURNAL Run 17
@@ -308,6 +334,15 @@ def run_from_config(config: dict, config_path: str) -> dict:
     print(f"Val:  {val_metrics}")
     print(f"Test: {test_metrics}")
 
+    wandb.log({"best_epoch": best_epoch, "final_val": val_metrics, "final_test": test_metrics})
+    wandb.summary["best_epoch"] = best_epoch
+    for k, v in val_metrics.items():
+        if not isinstance(v, dict):
+            wandb.summary[f"val_{k}"] = v
+    for k, v in test_metrics.items():
+        if not isinstance(v, dict):
+            wandb.summary[f"test_{k}"] = v
+
     append_journal_entry(
         config, config_path, device,
         n_nodes=data.num_nodes, n_edges=data.edge_index.shape[1],
@@ -326,9 +361,12 @@ def run_from_config(config: dict, config_path: str) -> dict:
         "epochs_cap": config["train"]["epochs"],
         "subsample_size": config["data"].get("subsample_size"),  # None for non-PaySim datasets
     }
+    wandb_url = None if wandb_run.disabled else wandb_run.url
+    wandb.finish()
+
     return {
         "val": val_metrics, "test": test_metrics, "best_epoch": best_epoch, "device": str(device),
-        "config_summary": config_summary,
+        "config_summary": config_summary, "wandb_url": wandb_url,
     }
 
 
