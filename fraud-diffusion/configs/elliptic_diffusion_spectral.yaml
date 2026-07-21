@@ -1,0 +1,59 @@
+seed: 42
+
+data:
+  dataset: elliptic
+  raw_dir: data/raw/elliptic/elliptic_bitcoin_dataset
+  processed_path: data/processed/elliptic_graph.pt
+  augmented_processed_path: data/processed/elliptic_graph_diffusion_spectral_augmented.pt
+  train_end_step: 34
+  val_end_step: 41
+
+diffusion:
+  num_timesteps: 1000
+  hidden_dim: 128
+  lr: 0.001
+  epochs: 1000
+  batch_size: 256
+  log_every: 25
+  model_path: models/diffusion/tabddpm_elliptic_spectral.pt
+  # Spectral-matching auxiliary loss, per 2026-07-21 discussion: compares eigenvalues of the
+  # synthetic (x0_pred) feature covariance matrix against the real fraud set's own covariance
+  # spectrum. Starts partway through training (same rationale as the adversarial phase — the
+  # denoiser needs to already be decent first). lambda_spectral swept via infra/sweep.py.
+  spectral:
+    enabled: true
+    start_epoch: 500
+    lambda_spectral: 0.1
+
+augment:
+  n_synthetic: 1731    # Run 39's best point
+  sampler: ddim
+  ddim_steps: 100       # Run 40's best point
+  k_connections: 5
+  clamp_std: 3.0
+
+# alpha=0.75, n_synthetic=1731, k_connections=5, clamp_std=3, ddim_steps=100 -- best-known recipe
+# combining Run 39 and Run 40's findings, now testing spectral-matching on top.
+model:
+  name: graphsage
+  hidden_dim: 128
+  num_layers: 2
+  dropout: 0.5
+
+loss:
+  name: focal
+  alpha: 0.75
+  gamma: 2.0
+
+train:
+  lr: 0.001
+  weight_decay: 0.00001
+  epochs: 1000
+  patience: 50
+  device: auto
+  ema_decay: 0.98
+  ema_start_epoch: 30
+
+journal:
+  path: LAB_JOURNAL.md
+  run_name: elliptic_graphsage_tabddpm_spectral_alpha075

@@ -18,6 +18,7 @@ Usage:
 """
 
 import argparse
+import copy
 import itertools
 import json
 import logging
@@ -25,8 +26,9 @@ import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import runpod
+import yaml
 
-from infra.runpod_serverless import invoke, sweep_config
+from infra.runpod_serverless import invoke
 
 logger = logging.getLogger(__name__)
 
@@ -37,21 +39,33 @@ def _default_run_name(base_config_path: str, point: dict) -> str:
     return f"{stem}_sweep_{tag}"
 
 
+def _set_nested(config: dict, dotted_path: str, value) -> None:
+    """Set config[a][b][c]=value for dotted_path="a.b.c", at ANY depth (not just one level) --
+    creates intermediate dicts as needed. Needed for configs like diffusion.spectral.lambda_spectral
+    (two levels deep) that sweep_config()'s section-keyed **overrides interface can't reach."""
+    keys = dotted_path.split(".")
+    d = config
+    for k in keys[:-1]:
+        d = d.setdefault(k, {})
+    d[keys[-1]] = value
+
+
 def build_grid(base_config_path: str, param_grid: dict, run_name_fn=None) -> list[tuple[str, dict, dict]]:
-    """param_grid: {"loss.alpha": [0.25, 0.5], "augment.clamp_std": [2, 3]} (dotted "section.field"
-    keys, matching sweep_config()'s section-keyed overrides) -> the full cartesian product, one
-    config per combination. Returns [(run_name, config_dict, point_dict), ...]."""
+    """param_grid: {"loss.alpha": [0.25, 0.5], "diffusion.spectral.lambda_spectral": [0.01, 0.1]}
+    (dotted keys at any depth) -> the full cartesian product, one config per combination. Returns
+    [(run_name, config_dict, point_dict), ...]."""
     run_name_fn = run_name_fn or (lambda point: _default_run_name(base_config_path, point))
+    with open(base_config_path) as f:
+        base_config = yaml.safe_load(f)
     keys = list(param_grid.keys())
     jobs = []
     for combo in itertools.product(*param_grid.values()):
         point = dict(zip(keys, combo))
-        overrides = {}
+        config = copy.deepcopy(base_config)
         for dotted_key, value in point.items():
-            section, field = dotted_key.split(".", 1)
-            overrides.setdefault(section, {})[field] = value
+            _set_nested(config, dotted_key, value)
         run_name = run_name_fn(point)
-        config = sweep_config(base_config_path, run_name, **overrides)
+        config.setdefault("journal", {})["run_name"] = run_name
         jobs.append((run_name, config, point))
     return jobs
 
