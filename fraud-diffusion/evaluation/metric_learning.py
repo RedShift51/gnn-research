@@ -57,7 +57,26 @@ def _centroid_scores(embeddings: torch.Tensor, fraud_centroid: torch.Tensor,
     return torch.sigmoid(dist_legit - dist_fraud).cpu().numpy()
 
 
-def run(config: dict, n_triplets_per_epoch: int = 2000, margin: float = 1.0) -> dict:
+def _compression_loss(embeddings: torch.Tensor, fraud_idx: torch.Tensor, legit_idx: torch.Tensor) -> torch.Tensor:
+    """Center Loss (Wen et al. 2016): explicit penalty pulling each class's embeddings toward
+    their OWN class centroid (computed fresh from the current forward pass, gradient flows
+    through both the points and the centroid -- a simpler variant than the original paper's
+    EMA-buffered centroid, equivalent to directly minimizing within-class variance). Triplet loss
+    only pulls anchor/positive together relatively; this adds an absolute pull toward each class's
+    center, directly targeting LAB_JOURNAL.md's finding that legit's spread (0.344) was ~2.7x
+    fraud's (0.126) in the unsupervised (plain triplet) embedding -- legit had nothing pulling it
+    together the way fraud-fraud positive pairs did."""
+    fraud_emb = embeddings[fraud_idx]
+    legit_emb = embeddings[legit_idx]
+    fraud_centroid = fraud_emb.mean(dim=0)
+    legit_centroid = legit_emb.mean(dim=0)
+    fraud_var = (fraud_emb - fraud_centroid).pow(2).sum(-1).mean()
+    legit_var = (legit_emb - legit_centroid).pow(2).sum(-1).mean()
+    return fraud_var + legit_var
+
+
+def run(config: dict, n_triplets_per_epoch: int = 2000, margin: float = 1.0,
+        compression_weight: float = 0.0) -> dict:
     wandb_run = init_wandb(config, "metric_learning")
     set_seed(config["seed"])
     device = pick_device(config["train"]["device"])
@@ -96,6 +115,9 @@ def run(config: dict, n_triplets_per_epoch: int = 2000, margin: float = 1.0) -> 
 
         anchor_idx, pos_idx, neg_idx = _sample_triplets(train_fraud_idx, train_legit_idx, n_triplets_per_epoch, generator)
         loss = triplet_loss_fn(embeddings[anchor_idx.to(device)], embeddings[pos_idx.to(device)], embeddings[neg_idx.to(device)])
+        if compression_weight > 0:
+            comp_loss = _compression_loss(embeddings, train_fraud_idx.to(device), train_legit_idx.to(device))
+            loss = loss + compression_weight * comp_loss
         loss.backward()
         optimizer.step()
 
@@ -176,9 +198,10 @@ def main() -> None:
     parser.add_argument("--config", required=True)
     parser.add_argument("--n-triplets", type=int, default=2000)
     parser.add_argument("--margin", type=float, default=1.0)
+    parser.add_argument("--compression-weight", type=float, default=0.0)
     args = parser.parse_args()
     config = load_config(args.config)
-    result = run(config, args.n_triplets, args.margin)
+    result = run(config, args.n_triplets, args.margin, args.compression_weight)
     print({k: v for k, v in result.items() if k not in ("test_scores", "test_y")})
 
 
