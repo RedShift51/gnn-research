@@ -15,7 +15,7 @@ from torch_geometric.loader import NeighborLoader
 
 from evaluation.metrics import compute_metrics
 from models.gnn.gat import GAT
-from models.gnn.graphsage import GraphSAGE
+from models.gnn.graphsage import GraphSAGE, GraphSAGEDiff
 from training.ema import EMA
 from training.losses import FocalLoss
 
@@ -55,6 +55,13 @@ def build_model(config: dict, in_dim: int) -> nn.Module:
             num_layers=mcfg["num_layers"],
             dropout=mcfg["dropout"],
         )
+    if name == "graphsage_diff":
+        return GraphSAGEDiff(
+            in_dim=in_dim,
+            hidden_dim=mcfg["hidden_dim"],
+            num_layers=mcfg["num_layers"],
+            dropout=mcfg["dropout"],
+        )
     if name == "gat":
         return GAT(
             in_dim=in_dim,
@@ -63,7 +70,7 @@ def build_model(config: dict, in_dim: int) -> nn.Module:
             heads=mcfg.get("heads", 8),
             dropout=mcfg["dropout"],
         )
-    raise ValueError(f"Unknown model.name in config: {name!r} (expected 'graphsage' or 'gat')")
+    raise ValueError(f"Unknown model.name in config: {name!r} (expected 'graphsage', 'graphsage_diff', or 'gat')")
 
 
 def build_oversampled_input_nodes(data, mask, target_fraud_frac: float, seed: int) -> torch.Tensor:
