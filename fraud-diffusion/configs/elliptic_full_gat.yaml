@@ -1,0 +1,37 @@
+seed: 42
+
+data:
+  dataset: elliptic
+  raw_dir: data/raw/elliptic/elliptic_bitcoin_dataset
+  processed_path: data/processed/elliptic_graph.pt
+  train_end_step: 34
+  val_end_step: 41
+
+# Full-batch GAT (no mini_batch) -- Elliptic's graph (468,710 directed edges) is ~60x smaller than
+# PaySim's full graph (28.3M directed edges), which is what forced PaySim's GAT into mini-batch/
+# neighbor-sampling in the first place (see configs/paysim_full_gat.yaml). Full-batch should fit
+# comfortably here at full standard GAT capacity (Velickovic et al. 2018 defaults).
+model:
+  name: gat
+  hidden_dim: 64
+  num_layers: 2
+  heads: 8
+  dropout: 0.6
+
+loss:
+  name: focal
+  alpha: 0.25
+  gamma: 2.0
+
+train:
+  lr: 0.005
+  weight_decay: 0.0005
+  epochs: 1000
+  patience: 50
+  device: auto
+  ema_decay: 0.98
+  ema_start_epoch: 30
+
+journal:
+  path: LAB_JOURNAL.md
+  run_name: elliptic_gat
