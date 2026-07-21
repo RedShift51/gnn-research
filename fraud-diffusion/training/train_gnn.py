@@ -422,6 +422,7 @@ def run_from_config(config: dict, config_path: str, git_commit: str | None = Non
             break
 
     model.load_state_dict(best_state)
+    test_predictions = None
     if mini_batch:
         val_metrics = evaluate_batched(model, val_loader, device)
         test_metrics = evaluate_batched(model, test_loader, device)
@@ -429,7 +430,21 @@ def run_from_config(config: dict, config_path: str, git_commit: str | None = Non
         val_metrics = evaluate(model, data, data.val_mask, device, edge_index=data.val_edge_index)
         # Moved to GPU just-in-time — see the setup comment above for why this isn't kept
         # resident throughout training.
-        test_metrics = evaluate(model, data, data.test_mask, device, edge_index=data.edge_index.to(device))
+        test_edge_index = data.edge_index.to(device)
+        test_metrics = evaluate(model, data, data.test_mask, device, edge_index=test_edge_index)
+        if config.get("debug", {}).get("return_test_predictions", False):
+            # Per-node test predictions, in the SAME boolean-mask order as
+            # evaluation/error_analysis.py's x[test_mask]/y[test_mask] arrays, so a caller can
+            # cross-reference which specific test nodes a GNN gets right/wrong against another
+            # model's (e.g. RF's) error breakdown without needing matching node IDs — just the
+            # same mask ordering. Off by default: JSON output size, not needed for normal runs.
+            model.eval()
+            with torch.no_grad():
+                test_probs = torch.sigmoid(model(data.x, test_edge_index)[data.test_mask]).cpu().numpy()
+            test_predictions = {
+                "probs": test_probs.tolist(),
+                "y_true": data.y[data.test_mask].cpu().numpy().tolist(),
+            }
 
     logger.info(f"Best epoch: {best_epoch}")
     logger.info(f"Val:  {val_metrics}")
@@ -473,7 +488,7 @@ def run_from_config(config: dict, config_path: str, git_commit: str | None = Non
 
     return {
         "val": val_metrics, "test": test_metrics, "best_epoch": best_epoch, "device": str(device),
-        "config_summary": config_summary, "wandb_url": wandb_url,
+        "config_summary": config_summary, "wandb_url": wandb_url, "test_predictions": test_predictions,
     }
 
 

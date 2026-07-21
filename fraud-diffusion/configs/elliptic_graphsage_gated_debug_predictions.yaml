@@ -1,0 +1,38 @@
+seed: 0
+
+data:
+  dataset: elliptic
+  raw_dir: data/raw/elliptic/elliptic_bitcoin_dataset
+  processed_path: data/processed/elliptic_graph.pt
+  train_end_step: 34
+  val_end_step: 41
+
+# Same as elliptic_full_graphsage_gated.yaml, but with debug.return_test_predictions=true so the
+# job output includes per-node test predictions -- used to cross-reference against Run 58's RF
+# error analysis (which test nodes get recovered vs still missed). 2026-07-21 discussion.
+model:
+  name: graphsage_gated
+  hidden_dim: 128
+  num_layers: 2
+  dropout: 0.5
+
+loss:
+  name: focal
+  alpha: 0.25
+  gamma: 2.0
+
+train:
+  lr: 0.001
+  weight_decay: 0.00001
+  epochs: 1000
+  patience: 50
+  device: auto
+  ema_decay: 0.98
+  ema_start_epoch: 30
+
+debug:
+  return_test_predictions: true
+
+journal:
+  path: LAB_JOURNAL.md
+  run_name: elliptic_graphsage_gated_debug_predictions
