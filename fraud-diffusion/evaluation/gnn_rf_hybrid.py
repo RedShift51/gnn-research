@@ -114,7 +114,9 @@ def run(config: dict, n_estimators: int = 300) -> dict:
     with torch.no_grad():
         # Full edge_index (not train_edge_index) -- fixed weights, no gradient, so this is
         # legitimate inference-time use of the complete graph, same rationale as test-time eval.
-        embeddings = model.embed(data.x, data.edge_index).cpu().numpy()
+        # Moved to device just-in-time, matching train_gnn.py's own pattern (it's never resident
+        # on GPU during training, only needed once here for embedding extraction).
+        embeddings = model.embed(data.x, data.edge_index.to(device)).cpu().numpy()
     raw_x = data.x.cpu().numpy()
     combined_x = np.concatenate([raw_x, embeddings], axis=1)
     y = data.y.cpu().numpy()
