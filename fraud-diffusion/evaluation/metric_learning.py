@@ -133,10 +133,28 @@ def run(config: dict, n_triplets_per_epoch: int = 2000, margin: float = 1.0) -> 
         legit_centroid = test_embeddings[train_legit_idx.to(device)].mean(dim=0)
         test_scores = _centroid_scores(test_embeddings[data.test_mask], fraud_centroid, legit_centroid)
 
+        # Raw per-centroid distances (not just the combined sigmoid score) -- lets a caller test
+        # legit-centroid-only scoring (2026-07-21 discussion: fraud may not cluster coherently
+        # enough for its own centroid to be a meaningful reference point, unlike legit) without
+        # retraining.
+        test_emb_masked = test_embeddings[data.test_mask]
+        dist_to_fraud = (test_emb_masked - fraud_centroid).pow(2).sum(-1).sqrt().cpu().numpy()
+        dist_to_legit = (test_emb_masked - legit_centroid).pow(2).sum(-1).sqrt().cpu().numpy()
+
+        # Within-class spread in the LEARNED embedding space -- is train fraud actually a
+        # coherent cluster (tight spread around its own centroid) or diffuse (large spread,
+        # meaning the fraud centroid itself is a weak/uninformative reference point)?
+        train_fraud_emb = test_embeddings[train_fraud_idx.to(device)]
+        train_legit_emb = test_embeddings[train_legit_idx.to(device)]
+        fraud_spread = (train_fraud_emb - fraud_centroid).pow(2).sum(-1).sqrt().cpu().numpy()
+        legit_spread = (train_legit_emb - legit_centroid).pow(2).sum(-1).sqrt().cpu().numpy()
+
     test_y = data.y[data.test_mask].cpu().numpy()
     test_metrics = compute_metrics(test_y, test_scores)
 
     logger.info(f"Metric learning (best_epoch={best_epoch}): Test={test_metrics}")
+    logger.info(f"Train fraud spread around its centroid: mean={fraud_spread.mean():.4f} std={fraud_spread.std():.4f}")
+    logger.info(f"Train legit spread around its centroid: mean={legit_spread.mean():.4f} std={legit_spread.std():.4f}")
     wandb_run.summary["best_epoch"] = best_epoch
     for k, v in test_metrics.items():
         if not isinstance(v, dict):
@@ -146,6 +164,9 @@ def run(config: dict, n_triplets_per_epoch: int = 2000, margin: float = 1.0) -> 
     return {
         "test": test_metrics, "best_epoch": best_epoch,
         "test_scores": test_scores.tolist(), "test_y": test_y.tolist(),
+        "dist_to_fraud": dist_to_fraud.tolist(), "dist_to_legit": dist_to_legit.tolist(),
+        "fraud_spread_mean": float(fraud_spread.mean()), "fraud_spread_std": float(fraud_spread.std()),
+        "legit_spread_mean": float(legit_spread.mean()), "legit_spread_std": float(legit_spread.std()),
     }
 
 
