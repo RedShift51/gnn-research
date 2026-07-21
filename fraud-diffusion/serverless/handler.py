@@ -29,8 +29,9 @@ import subprocess
 import runpod
 import torch
 
-from data.download import ensure_downloaded, ensure_downloaded_elliptic
+from data.download import ensure_downloaded, ensure_downloaded_elliptic, ensure_downloaded_ieee_cis
 from data.elliptic_preprocess import run_from_config as elliptic_preprocess_run
+from data.ieee_cis_preprocess import run_from_config as ieee_cis_preprocess_run
 from data.paysim_preprocess import load_config, run_from_config as paysim_preprocess_run
 from training.train_gnn import run_from_config as train_run
 
@@ -96,8 +97,11 @@ def handler(job):
         elif dataset == "paysim":
             ensure_downloaded()
             paysim_preprocess_run(config)
+        elif dataset == "ieee_cis":
+            ensure_downloaded_ieee_cis()
+            ieee_cis_preprocess_run(config)
         else:
-            raise ValueError(f"Unknown data.dataset: {dataset!r} (expected 'paysim' or 'elliptic')")
+            raise ValueError(f"Unknown data.dataset: {dataset!r} (expected 'paysim', 'elliptic', or 'ieee_cis')")
 
     if config.get("diffusion"):
         # Train a TabDDPM on fraud-only TRAIN features, sample synthetic fraud nodes, and add

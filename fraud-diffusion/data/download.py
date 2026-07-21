@@ -1,4 +1,4 @@
-"""Download the PaySim and Elliptic Bitcoin datasets from Kaggle."""
+"""Download the PaySim, Elliptic Bitcoin, and IEEE-CIS Fraud Detection datasets from Kaggle."""
 
 import logging
 import shutil
@@ -18,6 +18,19 @@ ELLIPTIC_RAW_DIR = RAW_DIR / "elliptic"
 # elliptic_bitcoin_dataset/ subfolder, not directly into ELLIPTIC_RAW_DIR.
 ELLIPTIC_NESTED_DIR = ELLIPTIC_RAW_DIR / "elliptic_bitcoin_dataset"
 ELLIPTIC_FEATURES_CSV = ELLIPTIC_NESTED_DIR / "elliptic_txs_features.csv"
+
+# The real IEEE-CIS Fraud Detection dataset is a Kaggle COMPETITION, not a plain dataset --
+# api.competition_download_files() 401s unless the account has clicked "I Understand and Accept"
+# on the competition rules page (only doable by a human via browser, not via API). Using a
+# community-uploaded plain-dataset mirror with the IDENTICAL original file structure
+# (train_transaction.csv/train_identity.csv/test_*.csv/sample_submission.csv) instead -- confirmed
+# via api.dataset_list_files() before picking this one. If this mirror ever disappears, search
+# "ieee fraud detection" via dataset_list() for another (several exist), or accept the competition
+# rules at kaggle.com/competitions/ieee-fraud-detection and switch to competition_download_files().
+IEEE_CIS_KAGGLE_DATASET = "lnasiri007/ieeecis-fraud-detection"
+IEEE_CIS_RAW_DIR = RAW_DIR / "ieee_cis"
+IEEE_CIS_TRANSACTION_CSV = IEEE_CIS_RAW_DIR / "train_transaction.csv"
+IEEE_CIS_IDENTITY_CSV = IEEE_CIS_RAW_DIR / "train_identity.csv"
 
 MANUAL_INSTRUCTIONS = f"""
 Kaggle credentials not found (~/.kaggle/kaggle.json).
@@ -102,6 +115,43 @@ def ensure_downloaded_elliptic() -> Path:
 
     logger.info(f"Saved to: {ELLIPTIC_NESTED_DIR}")
     return ELLIPTIC_NESTED_DIR
+
+
+def ensure_downloaded_ieee_cis() -> Path:
+    """Download IEEE-CIS (train_transaction.csv + train_identity.csv) if not already present,
+    return the directory containing both. Same never-sys.exit contract as the other
+    ensure_downloaded_*() functions above."""
+    IEEE_CIS_RAW_DIR.mkdir(parents=True, exist_ok=True)
+
+    if IEEE_CIS_TRANSACTION_CSV.exists() and IEEE_CIS_IDENTITY_CSV.exists():
+        logger.info(f"Already present: {IEEE_CIS_RAW_DIR}")
+        return IEEE_CIS_RAW_DIR
+
+    kaggle_creds = Path.home() / ".kaggle" / "kaggle.json"
+    if not kaggle_creds.exists():
+        raise RuntimeError(
+            f"Kaggle credentials not found (~/.kaggle/kaggle.json). See ensure_downloaded()'s "
+            f"MANUAL_INSTRUCTIONS for how to get one, or download "
+            f"https://www.kaggle.com/datasets/{IEEE_CIS_KAGGLE_DATASET} manually into "
+            f"{IEEE_CIS_RAW_DIR}."
+        )
+
+    from kaggle.api.kaggle_api_extended import KaggleApi
+
+    api = KaggleApi()
+    api.authenticate()
+    logger.info(f"Downloading {IEEE_CIS_KAGGLE_DATASET} ...")
+    api.dataset_download_files(IEEE_CIS_KAGGLE_DATASET, path=str(IEEE_CIS_RAW_DIR), unzip=True)
+
+    if not (IEEE_CIS_TRANSACTION_CSV.exists() and IEEE_CIS_IDENTITY_CSV.exists()):
+        found_txn = list(IEEE_CIS_RAW_DIR.rglob("train_transaction.csv"))
+        found_id = list(IEEE_CIS_RAW_DIR.rglob("train_identity.csv"))
+        if not (found_txn and found_id):
+            raise RuntimeError("Download finished but train_transaction/train_identity.csv not found.")
+        return found_txn[0].parent
+
+    logger.info(f"Saved to: {IEEE_CIS_RAW_DIR}")
+    return IEEE_CIS_RAW_DIR
 
 
 def main() -> None:
