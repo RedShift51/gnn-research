@@ -46,6 +46,28 @@ class TabDDPMDenoiser(nn.Module):
         return self.net(torch.cat([x, self.time_embed(t)], dim=-1))
 
 
+class Discriminator(nn.Module):
+    """Binary real-vs-synthetic classifier over whole feature vectors — the tabular analogue of a
+    GAN discriminator, for optionally adding an adversarial term to TabDDPM training (see
+    train_diffusion.py). PatchGAN-style discrimination (scoring local patches rather than the
+    whole sample) is an image-specific trick that exploits spatial locality between neighboring
+    pixels — tabular feature vectors have no such spatial structure to patch, so this scores the
+    whole vector at once instead."""
+
+    def __init__(self, feature_dim: int, hidden_dim: int = 128):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(feature_dim, hidden_dim),
+            nn.LeakyReLU(0.2),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LeakyReLU(0.2),
+            nn.Linear(hidden_dim, 1),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x).squeeze(-1)  # raw logits, not probabilities
+
+
 class GaussianDiffusion:
     """Linear beta-schedule DDPM: training loss (predict the noise) plus two samplers —
     ancestral DDPM sampling (all `num_timesteps` steps) and deterministic DDIM sampling (a
@@ -68,6 +90,17 @@ class GaussianDiffusion:
         sqrt_ac = self.sqrt_alphas_cumprod[t][:, None]
         sqrt_1m_ac = self.sqrt_one_minus_alphas_cumprod[t][:, None]
         return sqrt_ac * x0 + sqrt_1m_ac * noise
+
+    def predict_x0(self, x_t: torch.Tensor, t: torch.Tensor, pred_noise: torch.Tensor) -> torch.Tensor:
+        """One-step estimate of x0 from a noisy x_t and the denoiser's noise prediction — used by
+        the samplers (via inline duplicates) and by train_diffusion.py's adversarial loss, which
+        needs a "fake sample" to feed the discriminator without paying for a full multi-step
+        reverse-process sampling loop every training batch. Numerically unstable at large t (small
+        sqrt_alphas_cumprod denominator) — same reason the samplers clamp x0_pred; callers doing
+        anything gradient-sensitive with this should clamp too."""
+        sqrt_ac = self.sqrt_alphas_cumprod[t][:, None]
+        sqrt_1m_ac = self.sqrt_one_minus_alphas_cumprod[t][:, None]
+        return (x_t - sqrt_1m_ac * pred_noise) / sqrt_ac
 
     def training_loss(self, denoiser: nn.Module, x0: torch.Tensor) -> torch.Tensor:
         b = x0.shape[0]
