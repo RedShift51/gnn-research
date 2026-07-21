@@ -1,0 +1,43 @@
+seed: 42
+
+data:
+  dataset: ieee_cis
+  transaction_csv: data/raw/ieee_cis/train_transaction.csv
+  identity_csv: data/raw/ieee_cis/train_identity.csv
+  processed_path: data/processed/ieee_cis_graph.pt
+  subsample_size: null
+  max_node_degree: 20
+  train_frac: 0.70
+  val_frac: 0.15
+  test_frac: 0.15
+
+# GNN+RF hybrid (Elliptic's best-performing lever, Run 55, F1=0.7670) applied to IEEE-CIS -- RF
+# alone already beats the best plain-GNN result here too (0.7235 vs 0.6832 at alpha=0.75), same
+# pattern as Elliptic, so this is the natural next thing to try.
+model:
+  name: graphsage_diff
+  hidden_dim: 128
+  num_layers: 2
+  dropout: 0.5
+
+loss:
+  name: focal
+  alpha: 0.75
+  gamma: 2.0
+
+train:
+  lr: 0.001
+  weight_decay: 0.00001
+  epochs: 1000
+  patience: 50
+  device: auto
+  ema_decay: 0.98
+  ema_start_epoch: 30
+
+hybrid:
+  enabled: true
+  n_estimators: 300
+
+journal:
+  path: LAB_JOURNAL.md
+  run_name: ieee_cis_gnn_rf_hybrid_alpha075

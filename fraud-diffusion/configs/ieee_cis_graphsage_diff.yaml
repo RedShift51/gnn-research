@@ -1,0 +1,38 @@
+seed: 42
+
+data:
+  dataset: ieee_cis
+  transaction_csv: data/raw/ieee_cis/train_transaction.csv
+  identity_csv: data/raw/ieee_cis/train_identity.csv
+  processed_path: data/processed/ieee_cis_graph.pt
+  subsample_size: null
+  max_node_degree: 20
+  train_frac: 0.70
+  val_frac: 0.15
+  test_frac: 0.15
+
+# GraphSAGEDiff (Elliptic's best pure-GNN architecture, Run 49/50) at alpha=0.75 (Run 64's best
+# IEEE-CIS alpha) -- tests whether the self-vs-neighborhood deviation trick helps here too.
+model:
+  name: graphsage_diff
+  hidden_dim: 128
+  num_layers: 2
+  dropout: 0.5
+
+loss:
+  name: focal
+  alpha: 0.75
+  gamma: 2.0
+
+train:
+  lr: 0.001
+  weight_decay: 0.00001
+  epochs: 1000
+  patience: 50
+  device: auto
+  ema_decay: 0.98
+  ema_start_epoch: 30
+
+journal:
+  path: LAB_JOURNAL.md
+  run_name: ieee_cis_graphsage_diff_alpha075
