@@ -33,7 +33,9 @@ import argparse
 import copy
 import json
 import logging
+import os
 
+import runpod
 import wandb
 import yaml
 
@@ -114,6 +116,7 @@ def main() -> None:
         params = json.loads(args.params)
         create_sweep(args.project, args.method, args.metric, args.goal, params)
     elif args.command == "agent":
+        runpod.api_key = os.environ["RUNPOD_API_KEY"]
         run_agent(args.sweep_id, args.project, args.endpoint_id, args.base_config, args.count, args.timeout)
 
 

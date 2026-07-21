@@ -21,7 +21,10 @@ import argparse
 import itertools
 import json
 import logging
+import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+import runpod
 
 from infra.runpod_serverless import invoke, sweep_config
 
@@ -106,6 +109,7 @@ def main() -> None:
     parser.add_argument("--no-preprocess", action="store_true")
     args = parser.parse_args()
 
+    runpod.api_key = os.environ["RUNPOD_API_KEY"]
     param_grid = json.loads(args.grid)
     results = run_sweep(
         args.endpoint_id, args.base_config, param_grid,
