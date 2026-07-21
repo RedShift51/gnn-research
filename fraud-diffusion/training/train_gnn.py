@@ -10,6 +10,7 @@ import torch
 import torch.nn as nn
 import wandb
 import yaml
+from torch_geometric.data import Data
 from torch_geometric.loader import NeighborLoader
 
 from evaluation.metrics import compute_metrics
@@ -89,11 +90,27 @@ def build_oversampled_input_nodes(data, mask, target_fraud_frac: float, seed: in
     return combined[perm]
 
 
-def evaluate(model, data, mask, device) -> dict:
-    """Full-batch evaluation: one forward pass over the whole graph."""
+def _graph_view(data, edge_index):
+    """Same node features/labels, different edge_index — used to build separate NeighborLoaders
+    per split so mini-batch training never samples neighbors across val/test-period edges either
+    (the mini-batch analogue of the full-batch fix in evaluate(); see data/temporal_edges.py).
+    Deliberately NOT data.clone() + override: NeighborLoader only reads x/y/edge_index from the
+    Data it's given, and cloning the whole object would carry all three edge_index variants
+    (train/val/full) into every one of the three loaders' underlying Data — tripling memory on
+    PaySim's large graph (which has a real OOM history, see LAB_JOURNAL.md's GAT runs) for
+    tensors that loader will never touch."""
+    return Data(x=data.x, y=data.y, edge_index=edge_index)
+
+
+def evaluate(model, data, mask, device, edge_index=None) -> dict:
+    """Full-batch evaluation: one forward pass over the given edge_index (defaults to the full
+    graph). Pass data.val_edge_index/data.edge_index explicitly — see run_from_config's callers —
+    never the raw attribute name, so it's obvious at each call site which temporal edge view is
+    in use (train forward passes must NEVER default to the full graph; see
+    data/temporal_edges.py)."""
     model.eval()
     with torch.no_grad():
-        logits = model(data.x, data.edge_index)
+        logits = model(data.x, data.edge_index if edge_index is None else edge_index)
         probs = torch.sigmoid(logits[mask]).cpu().numpy()
         y_true = data.y[mask].cpu().numpy()
     return compute_metrics(y_true, probs)
@@ -140,8 +157,8 @@ def train_epoch_batched(model, loader, criterion, optimizer, device) -> float:
 
 
 def append_journal_entry(config: dict, config_path: str, device: torch.device,
-                          n_nodes: int, n_edges: int, epoch_stopped: int,
-                          val_metrics: dict, test_metrics: dict) -> None:
+                          n_nodes: int, n_edges: int, n_train_edges: int, n_val_edges: int,
+                          epoch_stopped: int, val_metrics: dict, test_metrics: dict) -> None:
     journal_path = ROOT / config["journal"]["path"]
     run_name = config["journal"]["run_name"]
 
@@ -165,7 +182,8 @@ def append_journal_entry(config: dict, config_path: str, device: torch.device,
     entry = f"""
 ## [{date.today().isoformat()}] Run {run_id} — {run_name}
 - Dataset / split: {dataset_desc}, config={config_path}
-- Graph: {n_nodes} nodes, {n_edges} directed edges
+- Graph: {n_nodes} nodes, {n_edges} directed edges (train-visible: {n_train_edges}, \
+val-visible: {n_val_edges}) — leakage-free temporal edge split, see data/temporal_edges.py
 - Model / config: {mcfg['name']} {mcfg['num_layers']}-layer, hidden={mcfg['hidden_dim']}, \
 dropout={mcfg['dropout']}, {lcfg['name']}Loss(alpha={lcfg['alpha']}, gamma={lcfg['gamma']}), \
 lr={tcfg['lr']}, stopped_epoch={epoch_stopped}
@@ -228,6 +246,8 @@ def run_from_config(config: dict, config_path: str, git_commit: str | None = Non
     data = torch.load(ROOT / config["data"]["processed_path"], weights_only=False)
     wandb_run.summary["n_nodes"] = data.num_nodes
     wandb_run.summary["n_edges"] = data.edge_index.shape[1]
+    wandb_run.summary["n_train_edges"] = data.train_edge_index.shape[1]
+    wandb_run.summary["n_val_edges"] = data.val_edge_index.shape[1]
 
     mini_batch = config["train"].get("mini_batch", False)
 
@@ -246,16 +266,19 @@ def run_from_config(config: dict, config_path: str, git_commit: str | None = Non
         else:
             train_input_nodes = data.train_mask
 
+        # Each loader samples from a DIFFERENT edge view — train must never sample across
+        # val/test-period edges (see data/temporal_edges.py); val/test inference legitimately can,
+        # since that's fixed-weight inference, not training.
         train_loader = NeighborLoader(
-            data, num_neighbors=num_neighbors, batch_size=batch_size,
+            _graph_view(data, data.train_edge_index), num_neighbors=num_neighbors, batch_size=batch_size,
             input_nodes=train_input_nodes, shuffle=True,
         )
         val_loader = NeighborLoader(
-            data, num_neighbors=num_neighbors, batch_size=batch_size,
+            _graph_view(data, data.val_edge_index), num_neighbors=num_neighbors, batch_size=batch_size,
             input_nodes=data.val_mask, shuffle=False,
         )
         test_loader = NeighborLoader(
-            data, num_neighbors=num_neighbors, batch_size=batch_size,
+            _graph_view(data, data.edge_index), num_neighbors=num_neighbors, batch_size=batch_size,
             input_nodes=data.test_mask, shuffle=False,
         )
     else:
@@ -291,7 +314,9 @@ def run_from_config(config: dict, config_path: str, git_commit: str | None = Non
         else:
             model.train()
             optimizer.zero_grad()
-            logits = model(data.x, data.edge_index)
+            # train_edge_index, NOT edge_index — the training forward pass must never see
+            # val/test-period edges (see data/temporal_edges.py; arXiv 2604.19514).
+            logits = model(data.x, data.train_edge_index)
             loss = criterion(logits[data.train_mask], data.y[data.train_mask])
             loss.backward()
             optimizer.step()
@@ -309,7 +334,7 @@ def run_from_config(config: dict, config_path: str, git_commit: str | None = Non
         if mini_batch:
             val_metrics = evaluate_batched(eval_source, val_loader, device)
         else:
-            val_metrics = evaluate(eval_source, data, data.val_mask, device)
+            val_metrics = evaluate(eval_source, data, data.val_mask, device, edge_index=data.val_edge_index)
 
         if val_metrics["auc_roc"] > best_val_auc:
             best_val_auc = val_metrics["auc_roc"]
@@ -336,8 +361,8 @@ def run_from_config(config: dict, config_path: str, git_commit: str | None = Non
         val_metrics = evaluate_batched(model, val_loader, device)
         test_metrics = evaluate_batched(model, test_loader, device)
     else:
-        val_metrics = evaluate(model, data, data.val_mask, device)
-        test_metrics = evaluate(model, data, data.test_mask, device)
+        val_metrics = evaluate(model, data, data.val_mask, device, edge_index=data.val_edge_index)
+        test_metrics = evaluate(model, data, data.test_mask, device, edge_index=data.edge_index)
 
     logger.info(f"Best epoch: {best_epoch}")
     logger.info(f"Val:  {val_metrics}")
@@ -360,6 +385,7 @@ def run_from_config(config: dict, config_path: str, git_commit: str | None = Non
     append_journal_entry(
         config, config_path, device,
         n_nodes=data.num_nodes, n_edges=data.edge_index.shape[1],
+        n_train_edges=data.train_edge_index.shape[1], n_val_edges=data.val_edge_index.shape[1],
         epoch_stopped=best_epoch, val_metrics=val_metrics, test_metrics=test_metrics,
     )
 

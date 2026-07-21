@@ -24,6 +24,8 @@ import yaml
 from sklearn.preprocessing import StandardScaler
 from torch_geometric.data import Data
 
+from data.temporal_edges import split_edge_index_by_time
+
 ROOT = Path(__file__).resolve().parent.parent
 N_FEATURES = 165
 logger = logging.getLogger(__name__)
@@ -87,12 +89,24 @@ def run_from_config(config: dict) -> Path:
     # (used for GAT mini-batch training) fails outright on that. See LAB_JOURNAL.md's PaySim bug.
     edge_index = np.ascontiguousarray(edge_index)
 
+    # Leakage-free temporal edge splits (see data/temporal_edges.py's docstring — arXiv 2604.19514
+    # found standard transductive GNN setups on Elliptic, where every training forward pass sees
+    # the WHOLE graph including val/test-period edges, produce a 39.5pt F1 gap vs strict inductive
+    # eval). train_edge_index is the ONLY graph the training loop may use; val_edge_index adds
+    # val-period edges back for legitimate fixed-weight val-time inference; the full edge_index
+    # above is reserved for test-time inference.
+    train_edge_index, val_edge_index = split_edge_index_by_time(edge_index, step, train_end, val_end)
+    logger.info(f"Temporal edge splits: train={train_edge_index.shape[1]} "
+                f"val={val_edge_index.shape[1]} full={edge_index.shape[1]} directed edges")
+
     y = df["y"].to_numpy(dtype=np.int64)
     y = np.where(y == -1, 0, y)
 
     data = Data(
         x=torch.from_numpy(x),
         edge_index=torch.from_numpy(edge_index),
+        train_edge_index=torch.from_numpy(train_edge_index),
+        val_edge_index=torch.from_numpy(val_edge_index),
         y=torch.from_numpy(y),
         train_mask=torch.from_numpy(train_mask),
         val_mask=torch.from_numpy(val_mask),

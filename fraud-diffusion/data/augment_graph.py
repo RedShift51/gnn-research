@@ -100,7 +100,12 @@ def run_from_config(config: dict) -> Path:
             src.extend([new_idx, c])
             dst.extend([c, new_idx])
     new_edge_index = torch.tensor([src, dst], dtype=torch.long)
-    augmented_edge_index = torch.cat([data.edge_index, new_edge_index], dim=1)
+    # Synthetic nodes are TRAIN-only (see augmented_train_mask below) — their edges belong in
+    # train_edge_index specifically, not the full/val edge views. val_edge_index and the full
+    # edge_index carry over UNCHANGED: val/test nodes' real neighborhoods never include synthetic
+    # nodes, so nothing there needs updating, and this keeps the leakage-free temporal edge split
+    # (data/temporal_edges.py) intact through augmentation instead of silently re-introducing it.
+    augmented_train_edge_index = torch.cat([data.train_edge_index, new_edge_index], dim=1)
 
     augmented_x = torch.cat([data.x, synthetic_x], dim=0)
     augmented_y = torch.cat([data.y, torch.ones(n_synthetic, dtype=data.y.dtype)])
@@ -110,7 +115,9 @@ def run_from_config(config: dict) -> Path:
 
     augmented_data = Data(
         x=augmented_x,
-        edge_index=augmented_edge_index,
+        edge_index=data.edge_index,
+        train_edge_index=augmented_train_edge_index,
+        val_edge_index=data.val_edge_index,
         y=augmented_y,
         train_mask=augmented_train_mask,
         val_mask=augmented_val_mask,
@@ -121,8 +128,8 @@ def run_from_config(config: dict) -> Path:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(augmented_data, out_path)
     logger.info(f"Saved augmented graph ({n_original} -> {augmented_data.num_nodes} nodes, "
-                f"+{n_synthetic} synthetic fraud, {augmented_edge_index.shape[1]} directed edges) "
-                f"to {out_path}")
+                f"+{n_synthetic} synthetic fraud, train_edge_index={augmented_train_edge_index.shape[1]} "
+                f"directed edges) to {out_path}")
     return out_path
 
 

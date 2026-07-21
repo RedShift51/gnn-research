@@ -18,6 +18,8 @@ import yaml
 from sklearn.preprocessing import StandardScaler
 from torch_geometric.data import Data
 
+from data.temporal_edges import split_edge_index_by_time
+
 ROOT = Path(__file__).resolve().parent.parent
 logger = logging.getLogger(__name__)
 
@@ -112,6 +114,10 @@ def build_edges(df: pd.DataFrame, max_node_degree: int) -> np.ndarray:
 
 
 def temporal_split_masks(n: int, train_frac: float, val_frac: float) -> tuple:
+    """Returns (train_mask, val_mask, test_mask, train_end, val_end) — the row-index breakpoints
+    are returned too so callers can also filter edges by the same temporal boundary (see
+    data/temporal_edges.py), since row position IS temporal position here (df is sorted by `step`
+    before this runs)."""
     train_end = int(n * train_frac)
     val_end = train_end + int(n * val_frac)
 
@@ -123,7 +129,7 @@ def temporal_split_masks(n: int, train_frac: float, val_frac: float) -> tuple:
     val_mask[train_end:val_end] = True
     test_mask[val_end:] = True
 
-    return train_mask, val_mask, test_mask
+    return train_mask, val_mask, test_mask, train_end, val_end
 
 
 def run_from_config(config: dict) -> Path:
@@ -146,7 +152,7 @@ def run_from_config(config: dict) -> Path:
                 f"{df['isFraud'].mean():.4%} rate)")
 
     n = len(df)
-    train_mask, val_mask, test_mask = temporal_split_masks(
+    train_mask, val_mask, test_mask, train_end, val_end = temporal_split_masks(
         n, data_cfg["train_frac"], data_cfg["val_frac"]
     )
     logger.info(f"Split sizes: train={train_mask.sum()} val={val_mask.sum()} test={test_mask.sum()}")
@@ -162,11 +168,28 @@ def run_from_config(config: dict) -> Path:
     edge_index = build_edges(df, data_cfg["max_node_degree"])
     logger.info(f"Built {edge_index.shape[1]} directed edges over {n} nodes")
 
+    # Leakage-free temporal edge splits (see data/temporal_edges.py's docstring — arXiv 2604.19514
+    # found standard transductive GNN setups, where every training forward pass sees the WHOLE
+    # graph including val/test-period edges, produce a large F1 gap vs strict inductive eval).
+    # Row position IS temporal position here (df sorted by step before edges were built), so
+    # node_time is just the row index. split_edge_index_by_time uses INCLUSIVE "<=" boundaries
+    # (matching Elliptic's step<=train_end_step convention), but temporal_split_masks above uses
+    # EXCLUSIVE Python-slice boundaries (train_mask[:train_end] -> indices 0..train_end-1 are
+    # train, so index train_end itself is the FIRST val row) -- passing train_end/val_end directly
+    # would misclassify that one boundary row as train-visible, a one-row reintroduction of the
+    # exact leakage this split exists to prevent. -1 aligns the two conventions.
+    node_time = np.arange(n)
+    train_edge_index, val_edge_index = split_edge_index_by_time(edge_index, node_time, train_end - 1, val_end - 1)
+    logger.info(f"Temporal edge splits: train={train_edge_index.shape[1]} "
+                f"val={val_edge_index.shape[1]} full={edge_index.shape[1]} directed edges")
+
     y = df["isFraud"].to_numpy(dtype=np.int64)
 
     data = Data(
         x=torch.from_numpy(features),
         edge_index=torch.from_numpy(edge_index),
+        train_edge_index=torch.from_numpy(train_edge_index),
+        val_edge_index=torch.from_numpy(val_edge_index),
         y=torch.from_numpy(y),
         train_mask=torch.from_numpy(train_mask),
         val_mask=torch.from_numpy(val_mask),
