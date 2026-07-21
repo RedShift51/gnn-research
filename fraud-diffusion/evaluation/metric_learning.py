@@ -218,9 +218,28 @@ def run(config: dict, n_triplets_per_epoch: int = 2000, margin: float = 1.0,
     if return_embeddings:
         # Off by default -- only needed for the embedding-dimension / linear-probe analysis
         # (2026-07-21 discussion), which doesn't need retraining once these are captured.
-        result["test_embeddings"] = test_embeddings[data.test_mask].cpu().numpy().tolist()
-        result["train_fraud_embeddings"] = train_fraud_emb.cpu().numpy().tolist()
-        result["train_legit_embeddings"] = train_legit_emb.cpu().numpy().tolist()
+        # BUG FOUND (2026-07-21): returning ALL embeddings (test ~8841 + train fraud ~3462 +
+        # train legit ~5500, each 128-dim, as JSON) silently produced a job with status=COMPLETED
+        # but output=None -- almost certainly a RunPod output-payload size limit (~30-40MB
+        # estimated), which fails SILENTLY rather than raising a clear error. Fixed by keeping ALL
+        # fraud (rare, most important, small in absolute count) but subsampling legit, plus
+        # rounding to 5 decimals -- cuts payload by roughly an order of magnitude.
+        rng = np.random.default_rng(config["seed"])
+        test_y_np = test_y
+        test_fraud_pos = np.where(test_y_np == 1)[0]
+        test_legit_pos = np.where(test_y_np == 0)[0]
+        test_legit_sample = rng.choice(test_legit_pos, size=min(1500, len(test_legit_pos)), replace=False)
+        test_keep = np.sort(np.concatenate([test_fraud_pos, test_legit_sample]))
+
+        legit_idx_sample = rng.choice(len(train_legit_emb), size=min(1500, len(train_legit_emb)), replace=False)
+
+        def _round(arr):
+            return np.round(arr, 5).tolist()
+
+        result["test_embeddings"] = _round(test_emb_masked[test_keep].cpu().numpy())
+        result["test_embeddings_y"] = test_y_np[test_keep].tolist()
+        result["train_fraud_embeddings"] = _round(train_fraud_emb.cpu().numpy())  # small (~3462), kept in full
+        result["train_legit_embeddings"] = _round(train_legit_emb[legit_idx_sample].cpu().numpy())
     return result
 
 
