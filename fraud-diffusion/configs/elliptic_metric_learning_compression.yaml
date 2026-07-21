@@ -1,0 +1,39 @@
+seed: 42
+
+data:
+  dataset: elliptic
+  raw_dir: data/raw/elliptic/elliptic_bitcoin_dataset
+  processed_path: data/processed/elliptic_graph.pt
+  train_end_step: 34
+  val_end_step: 41
+
+# Same as elliptic_metric_learning.yaml, + compression (Center) loss -- explicit pull toward each
+# class's own centroid. Motivated directly by the first metric-learning run's finding: legit's
+# spread around its own centroid (0.344) was ~2.7x fraud's (0.126), plausibly because the triplet
+# loss only pulls fraud-fraud pairs together explicitly (as positives) but never pulls legit-legit
+# pairs together at all. Tighter legit clustering could make the decision boundary clearer,
+# particularly relevant given post-break fraud's distance profile nearly matches legit's own
+# (2026-07-21 discussion) -- a tighter, more confident legit reference point may help separate the
+# genuinely-camouflaged fraud from true legit better than a diffuse legit centroid does.
+model:
+  name: graphsage_diff
+  hidden_dim: 128
+  num_layers: 2
+  dropout: 0.5
+
+train:
+  lr: 0.001
+  weight_decay: 0.00001
+  epochs: 1000
+  patience: 50
+  device: auto
+
+metric_learning:
+  enabled: true
+  n_triplets_per_epoch: 2000
+  margin: 1.0
+  compression_weight: 0.5
+
+journal:
+  path: LAB_JOURNAL.md
+  run_name: elliptic_metric_learning_compression
