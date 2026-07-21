@@ -1,0 +1,47 @@
+seed: 42
+
+data:
+  dataset: ieee_cis
+  transaction_csv: data/raw/ieee_cis/train_transaction.csv
+  identity_csv: data/raw/ieee_cis/train_identity.csv
+  processed_path: data/processed/ieee_cis_graph.pt
+  subsample_size: null
+  max_node_degree: 20
+  train_frac: 0.70
+  val_frac: 0.15
+  test_frac: 0.15
+
+# Same as ieee_cis_graphsage_diff.yaml, but mini-batch (NeighborLoader) instead of full-batch --
+# the full-batch version consistently failed ("job timed out after 1 retries", ~100-155s execution
+# each time, even after raising the endpoint's executionTimeoutMs to 30 min) while plain GraphSAGE
+# succeeds fine on this same graph (Run 63/64). Likely cause: GraphSAGEDiff's embed() does a full
+# scatter over ALL 28M+ train edges (computing neighbor_mean) BEFORE the first SAGEConv, on top of
+# a tripled input dimension for that first layer -- probably a genuine memory/compute limit at this
+# scale (41M edges vs Elliptic's ~460K), not an infra fluke. Same fix as PaySim's GAT scaling issue
+# (configs/paysim_full_gat.yaml): mini-batch instead of shrinking the model.
+model:
+  name: graphsage_diff
+  hidden_dim: 128
+  num_layers: 2
+  dropout: 0.5
+
+loss:
+  name: focal
+  alpha: 0.75
+  gamma: 2.0
+
+train:
+  lr: 0.001
+  weight_decay: 0.00001
+  epochs: 1000
+  patience: 50
+  device: auto
+  ema_decay: 0.98
+  ema_start_epoch: 30
+  mini_batch: true
+  batch_size: 1024
+  num_neighbors: [15, 10]
+
+journal:
+  path: LAB_JOURNAL.md
+  run_name: ieee_cis_graphsage_diff_minibatch
