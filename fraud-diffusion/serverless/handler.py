@@ -123,6 +123,14 @@ def handler(job):
             # feature interactions far better than a single linear layer does).
             from evaluation.gnn_rf_hybrid import run as hybrid_run
             result = hybrid_run(config, n_estimators=config["hybrid"].get("n_estimators", 300))
+        elif config.get("metric_learning", {}).get("enabled"):
+            # GNN encoder trained via triplet loss + nearest-centroid classification instead of a
+            # classification head — see evaluation/metric_learning.py and LAB_JOURNAL.md's
+            # regime-break discussion (Runs 74-77) for the motivation.
+            from evaluation.metric_learning import run as metric_learning_run
+            mcfg = config["metric_learning"]
+            result = metric_learning_run(config, n_triplets_per_epoch=mcfg.get("n_triplets_per_epoch", 2000),
+                                          margin=mcfg.get("margin", 1.0))
         else:
             result = train_run(config, config_label, git_commit=commit_sha)
     except torch.cuda.OutOfMemoryError:
