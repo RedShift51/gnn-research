@@ -4,6 +4,7 @@ stay exactly as they were, so evaluation always measures generalization to real 
 
 import argparse
 import logging
+from collections import defaultdict
 from pathlib import Path
 
 import torch
@@ -77,28 +78,56 @@ def run_from_config(config: dict) -> Path:
     train_idx = data.train_mask.nonzero(as_tuple=True)[0]
 
     # attach_to="fraud_only" restricts candidate connections to real fraud TRAIN nodes instead of
-    # the whole TRAIN pool. Default ("all") preserves original behavior. On PaySim's huge graph
-    # (~1.9M train nodes) attaching to the whole pool only perturbs ~1% of train nodes regardless;
-    # on Elliptic's much smaller graph (~30K train nodes) the same k_connections/n_synthetic recipe
-    # attached ~44% of ALL train nodes (mostly legit) to a synthetic fraud neighbor — a much bigger,
-    # uncontrolled structural perturbation, and a plausible cause of Run 33's uniformly bad sweep.
+    # the whole TRAIN pool. attach_to="template" is a different mechanism entirely — see below.
+    # Default ("all") preserves original behavior. On PaySim's huge graph (~1.9M train nodes)
+    # attaching to the whole pool only perturbs ~1% of train nodes regardless; on Elliptic's much
+    # smaller graph (~30K train nodes) the same k_connections/n_synthetic recipe attached ~44% of
+    # ALL train nodes (mostly legit) to a synthetic fraud neighbor — a much bigger, uncontrolled
+    # structural perturbation, and a plausible cause of Run 33's uniformly bad sweep.
     attach_to = acfg.get("attach_to", "all")
-    if attach_to == "fraud_only":
-        train_idx = train_idx[data.y[train_idx] == 1]
-    elif attach_to != "all":
-        raise ValueError(f"Unknown augment.attach_to: {attach_to!r} (expected 'all' or 'fraud_only')")
-
-    # Attach each synthetic fraud node to a random sample of real TRAIN nodes, so it actually
-    # participates in message passing (like a real transaction touching real accounts) instead
-    # of sitting isolated in the graph.
-    k_connections = acfg.get("k_connections", 5)
     generator = torch.Generator().manual_seed(config["seed"])
     src, dst = [], []
-    for new_idx in new_indices.tolist():
-        chosen = train_idx[torch.randint(0, train_idx.numel(), (k_connections,), generator=generator)]
-        for c in chosen.tolist():
-            src.extend([new_idx, c])
-            dst.extend([c, new_idx])
+
+    if attach_to == "template":
+        # Structure-preserving augmentation (2026-07-21 discussion): attaching each synthetic node
+        # to k RANDOM nodes invents edges that don't reflect how real fraud nodes actually connect
+        # — arguably vandalizing the graph's structural invariants rather than augmenting them,
+        # which could explain why diffusion augmentation gives only modest/inconsistent GNN gains
+        # despite a plain Random Forest on raw features beating every GNN variant (Run 40): RF
+        # never relies on structure, so it's unaffected by this; the GNN is. Here, each synthetic
+        # node clones a REAL fraud TRAIN node's actual local neighborhood (not a fixed k) — same
+        # real edges a real fraud node has, fresh independently-diffused features. This is
+        # deliberately NOT full graph structure generation (that's a much harder open problem, see
+        # CLAUDE.md's "Approach 3: Graph Structure Diffusion") — just reusing real local topology
+        # as a template instead of inventing new, structurally-arbitrary edges.
+        adj = defaultdict(list)
+        for s, d in zip(data.train_edge_index[0].tolist(), data.train_edge_index[1].tolist()):
+            adj[s].append(d)
+        fraud_train_idx = train_idx[data.y[train_idx] == 1]
+        template_pool = torch.tensor([t for t in fraud_train_idx.tolist() if len(adj[t]) > 0])
+        if template_pool.numel() == 0:
+            raise ValueError("attach_to='template': no real fraud TRAIN node has any neighbor "
+                              "in train_edge_index to use as a template.")
+        for new_idx in new_indices.tolist():
+            template = template_pool[torch.randint(0, template_pool.numel(), (1,), generator=generator)].item()
+            for c in adj[template]:
+                src.extend([new_idx, c])
+                dst.extend([c, new_idx])
+    elif attach_to in ("fraud_only", "all"):
+        if attach_to == "fraud_only":
+            train_idx = train_idx[data.y[train_idx] == 1]
+        # Attach each synthetic fraud node to a random sample of real TRAIN nodes, so it actually
+        # participates in message passing (like a real transaction touching real accounts) instead
+        # of sitting isolated in the graph.
+        k_connections = acfg.get("k_connections", 5)
+        for new_idx in new_indices.tolist():
+            chosen = train_idx[torch.randint(0, train_idx.numel(), (k_connections,), generator=generator)]
+            for c in chosen.tolist():
+                src.extend([new_idx, c])
+                dst.extend([c, new_idx])
+    else:
+        raise ValueError(f"Unknown augment.attach_to: {attach_to!r} (expected 'all', 'fraud_only', or 'template')")
+
     new_edge_index = torch.tensor([src, dst], dtype=torch.long)
     # Synthetic nodes are TRAIN-only (see augmented_train_mask below) — their edges belong in
     # train_edge_index specifically, not the full/val edge views. val_edge_index and the full
