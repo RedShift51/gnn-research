@@ -17,9 +17,26 @@ def g_mean(y_true: np.ndarray, y_pred: np.ndarray) -> float:
 def compute_metrics(y_true: np.ndarray, y_prob: np.ndarray, threshold: float = 0.5) -> dict:
     y_pred = (y_prob >= threshold).astype(int)
 
+    tp = int(np.sum((y_pred == 1) & (y_true == 1)))
+    fn = int(np.sum((y_pred == 0) & (y_true == 1)))
+    tn = int(np.sum((y_pred == 0) & (y_true == 0)))
+    fp = int(np.sum((y_pred == 1) & (y_true == 0)))
+
+    precision_fraud = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    recall_fraud = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    precision_legit = tn / (tn + fn) if (tn + fn) > 0 else 0.0
+    recall_legit = tn / (tn + fp) if (tn + fp) > 0 else 0.0
+
     return {
         "f1_macro": float(f1_score(y_true, y_pred, average="macro", zero_division=0)),
         "auc_roc": float(roc_auc_score(y_true, y_prob)) if len(np.unique(y_true)) > 1 else float("nan"),
         "auprc": float(average_precision_score(y_true, y_prob)),
         "g_mean": g_mean(y_true, y_pred),
+        "confusion": {"tp": tp, "fp": fp, "tn": tn, "fn": fn},
+        "precision_fraud": precision_fraud,
+        "recall_fraud": recall_fraud,
+        "precision_legit": precision_legit,
+        "recall_legit": recall_legit,
+        "predicted_positive_rate": float(np.mean(y_pred == 1)),
+        "actual_positive_rate": float(np.mean(y_true == 1)),
     }
