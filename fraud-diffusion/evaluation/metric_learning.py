@@ -65,6 +65,30 @@ def _hard_triplets(embeddings: torch.Tensor, fraud_idx: torch.Tensor, legit_idx:
     return fraud_emb, fraud_emb[hardest_pos], legit_emb[hardest_neg]
 
 
+def _camo_weighted_loss(embeddings: torch.Tensor, anchor_idx: torch.Tensor, pos_idx: torch.Tensor,
+                         neg_idx: torch.Tensor, legit_centroid: torch.Tensor, margin: float) -> torch.Tensor:
+    """Soft importance-weighted triplet loss -- a gentler alternative to _hard_triplets' all-or-
+    nothing hardest-example selection (Run 79: that destabilized training badly, F1 crashed to
+    0.325). Same RANDOM triplets as _sample_triplets, but each triplet's loss contribution is
+    up-weighted by how close its fraud ANCHOR currently is to the legit centroid -- i.e., how
+    "camouflaged" it already looks. Directly motivated by Run 81: post-break fraud aligns 95% with
+    a camouflaged sub-cluster that already exists (at ~40% prevalence) within the easy, well-
+    classified period, but gets diluted by averaging with the "obvious" majority in the current
+    (unweighted) triplet loss. Softmax weighting (not hard top-1 selection) keeps every triplet
+    contributing something, avoiding the non-stationary "hardest changes every epoch" instability."""
+    anchor = embeddings[anchor_idx]
+    pos = embeddings[pos_idx]
+    neg = embeddings[neg_idx]
+    d_pos = (anchor - pos).pow(2).sum(-1)
+    d_neg = (anchor - neg).pow(2).sum(-1)
+    per_triplet_loss = F.relu(d_pos - d_neg + margin)
+
+    dist_to_legit = (anchor - legit_centroid).pow(2).sum(-1).sqrt()
+    weight = torch.softmax(-dist_to_legit, dim=0) * len(dist_to_legit)  # mean weight ~= 1
+    return (per_triplet_loss * weight.detach()).mean()  # detach: weight is a sampling emphasis,
+    # not something the anchor's position should be optimized to change
+
+
 def _centroid_scores(embeddings: torch.Tensor, fraud_centroid: torch.Tensor,
                       legit_centroid: torch.Tensor) -> np.ndarray:
     """Fraud-likeness score for nearest-centroid classification: positive = closer to the fraud
@@ -134,12 +158,18 @@ def run(config: dict, n_triplets_per_epoch: int = 2000, margin: float = 1.0,
 
         if mining == "hard":
             anchor_emb, pos_emb, neg_emb = _hard_triplets(embeddings, train_fraud_idx.to(device), train_legit_idx.to(device))
+            loss = triplet_loss_fn(anchor_emb, pos_emb, neg_emb)
         elif mining == "random":
             anchor_idx, pos_idx, neg_idx = _sample_triplets(train_fraud_idx, train_legit_idx, n_triplets_per_epoch, generator)
             anchor_emb, pos_emb, neg_emb = embeddings[anchor_idx.to(device)], embeddings[pos_idx.to(device)], embeddings[neg_idx.to(device)]
+            loss = triplet_loss_fn(anchor_emb, pos_emb, neg_emb)
+        elif mining == "camo_weighted":
+            anchor_idx, pos_idx, neg_idx = _sample_triplets(train_fraud_idx, train_legit_idx, n_triplets_per_epoch, generator)
+            legit_centroid_live = embeddings[train_legit_idx.to(device)].mean(dim=0)
+            loss = _camo_weighted_loss(embeddings, anchor_idx.to(device), pos_idx.to(device), neg_idx.to(device),
+                                        legit_centroid_live, margin)
         else:
-            raise ValueError(f"Unknown mining: {mining!r} (expected 'random' or 'hard')")
-        loss = triplet_loss_fn(anchor_emb, pos_emb, neg_emb)
+            raise ValueError(f"Unknown mining: {mining!r} (expected 'random', 'hard', or 'camo_weighted')")
         if compression_weight > 0:
             comp_loss = _compression_loss(embeddings, train_fraud_idx.to(device), train_legit_idx.to(device))
             loss = loss + compression_weight * comp_loss
