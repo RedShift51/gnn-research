@@ -27,6 +27,7 @@ import os
 import subprocess
 
 import runpod
+import torch
 
 from data.download import ensure_downloaded, ensure_downloaded_elliptic
 from data.elliptic_preprocess import run_from_config as elliptic_preprocess_run
@@ -111,7 +112,22 @@ def handler(job):
         config["data"]["processed_path"] = config["data"]["augmented_processed_path"]
         logger.info(f"GNN training will use the augmented graph: {config['data']['processed_path']}")
 
-    result = train_run(config, config_label, git_commit=commit_sha)
+    try:
+        result = train_run(config, config_label, git_commit=commit_sha)
+    except torch.cuda.OutOfMemoryError:
+        # A worker that OOMs mid-training stays "healthy" from RunPod's point of view — the
+        # exception is caught by RunPod's own job wrapper, not the worker process, which keeps
+        # running and serving future jobs. But the failed job's exception traceback (kept alive
+        # by that same wrapper for error reporting) pins its tensors in GPU memory forever within
+        # this process — confirmed directly: two DIFFERENT PaySim jobs landed on the same worker
+        # PID back-to-back and both OOM'd with nearly identical memory-in-use numbers, even after
+        # adding torch.cuda.empty_cache() at the start of run_from_config() (which can only free
+        # memory this job isn't still referencing — not memory pinned by a PREVIOUS job's
+        # lingering traceback in a different stack frame). The only real fix is to kill the whole
+        # process so RunPod is forced to provision a fresh, unpoisoned worker for the next job.
+        logger.error("CUDA OOM — killing this worker process so RunPod provisions a fresh one "
+                     "instead of reusing one with unreclaimable GPU memory (see LAB_JOURNAL.md).")
+        os._exit(1)
     # In the returned output (not just logs) so a stale worker is detectable from the job status
     # API alone, even in the case where it ISN'T missing a file (e.g. only a few commits behind).
     result["worker_git_commit"] = commit_sha
