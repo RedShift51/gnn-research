@@ -27,8 +27,9 @@ import subprocess
 
 import runpod
 
-from data.download import ensure_downloaded
-from data.paysim_preprocess import load_config, run_from_config as preprocess_run
+from data.download import ensure_downloaded, ensure_downloaded_elliptic
+from data.elliptic_preprocess import run_from_config as elliptic_preprocess_run
+from data.paysim_preprocess import load_config, run_from_config as paysim_preprocess_run
 from training.train_gnn import run_from_config as train_run
 
 
@@ -76,12 +77,19 @@ def handler(job):
     print(f"Resolved config_label: {config_label}")
     print(f"Resolved config: {config}")
 
+    dataset = config.get("data", {}).get("dataset", "paysim")
     if do_preprocess:
         # The image ships no dataset (.dockerignore excludes data/raw/) — download it into the
         # container on first use. entrypoint.sh already wrote ~/.kaggle/kaggle.json from the
         # KAGGLE_USERNAME/KAGGLE_KEY env vars (RunPod Secrets or template env) before this runs.
-        ensure_downloaded()
-        preprocess_run(config)
+        if dataset == "elliptic":
+            ensure_downloaded_elliptic()
+            elliptic_preprocess_run(config)
+        elif dataset == "paysim":
+            ensure_downloaded()
+            paysim_preprocess_run(config)
+        else:
+            raise ValueError(f"Unknown data.dataset: {dataset!r} (expected 'paysim' or 'elliptic')")
 
     if config.get("diffusion"):
         # Train a TabDDPM on fraud-only TRAIN features, sample synthetic fraud nodes, and add
