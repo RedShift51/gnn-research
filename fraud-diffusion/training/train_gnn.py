@@ -148,11 +148,20 @@ def append_journal_entry(config: dict, config_path: str, device: torch.device,
 
     dcfg, mcfg, lcfg, tcfg = config["data"], config["model"], config["loss"], config["train"]
 
+    dataset_name = dcfg.get("dataset", "paysim")
+    if dataset_name == "paysim":
+        dataset_desc = (f"PaySim ({'+'.join(dcfg['fraud_types'])}, subsample={dcfg['subsample_size']}), "
+                        f"temporal {dcfg['train_frac']:.0%}/{dcfg['val_frac']:.0%}/{dcfg['test_frac']:.0%}")
+    elif dataset_name == "elliptic":
+        dataset_desc = (f"Elliptic Bitcoin, temporal by step (train<={dcfg['train_end_step']}, "
+                        f"val<={dcfg['val_end_step']}, test after)")
+    else:
+        dataset_desc = f"{dataset_name} (config={dcfg})"
+
     entry = f"""
 ## [{date.today().isoformat()}] Run {run_id} — {run_name}
-- Dataset / split: PaySim ({'+'.join(dcfg['fraud_types'])}, subsample={dcfg['subsample_size']}), \
-temporal {dcfg['train_frac']:.0%}/{dcfg['val_frac']:.0%}/{dcfg['test_frac']:.0%}, config={config_path}
-- Graph: {n_nodes} nodes, {n_edges} directed edges, max_node_degree={dcfg['max_node_degree']}
+- Dataset / split: {dataset_desc}, config={config_path}
+- Graph: {n_nodes} nodes, {n_edges} directed edges
 - Model / config: {mcfg['name']} {mcfg['num_layers']}-layer, hidden={mcfg['hidden_dim']}, \
 dropout={mcfg['dropout']}, {lcfg['name']}Loss(alpha={lcfg['alpha']}, gamma={lcfg['gamma']}), \
 lr={tcfg['lr']}, stopped_epoch={epoch_stopped}
@@ -310,11 +319,12 @@ def run_from_config(config: dict, config_path: str) -> dict:
     # worker silently running the wrong config is otherwise invisible in unattended/overnight runs.
     config_summary = {
         "config_label": config_path,
+        "dataset": config["data"].get("dataset", "paysim"),
         "model_name": config["model"]["name"],
         "mini_batch": mini_batch,
         "oversample_fraud_frac": config["train"].get("oversample_fraud_frac", 0.0),
         "epochs_cap": config["train"]["epochs"],
-        "subsample_size": config["data"]["subsample_size"],
+        "subsample_size": config["data"].get("subsample_size"),  # None for non-PaySim datasets
     }
     return {
         "val": val_metrics, "test": test_metrics, "best_epoch": best_epoch, "device": str(device),
