@@ -1,0 +1,55 @@
+seed: 42
+
+data:
+  dataset: elliptic
+  raw_dir: data/raw/elliptic/elliptic_bitcoin_dataset
+  processed_path: data/processed/elliptic_graph.pt
+  augmented_processed_path: data/processed/elliptic_graph_diffusion_template_augmented.pt
+  train_end_step: 34
+  val_end_step: 41
+
+diffusion:
+  num_timesteps: 1000
+  hidden_dim: 128
+  lr: 0.001
+  epochs: 1000
+  batch_size: 256
+  log_every: 25
+  model_path: models/diffusion/tabddpm_elliptic_template.pt
+
+augment:
+  n_synthetic: 1731    # Run 39's best point
+  sampler: ddim
+  ddim_steps: 100       # Run 40's best point
+  clamp_std: 3.0
+  # Structure-preserving attachment (2026-07-21 discussion): each synthetic node clones a real
+  # fraud TRAIN node's actual local neighborhood (real edges, not a fixed k random ones) --
+  # testing whether random-heuristic wiring was itself part of why diffusion augmentation gives
+  # only modest/inconsistent gains despite Random Forest beating every GNN variant tried (Run 40).
+  attach_to: template
+
+# alpha=0.75, n_synthetic=1731, ddim_steps=100 -- best-known recipe (Runs 39/40), now testing
+# structure-preserving attachment instead of the default k-random-nodes heuristic.
+model:
+  name: graphsage
+  hidden_dim: 128
+  num_layers: 2
+  dropout: 0.5
+
+loss:
+  name: focal
+  alpha: 0.75
+  gamma: 2.0
+
+train:
+  lr: 0.001
+  weight_decay: 0.00001
+  epochs: 1000
+  patience: 50
+  device: auto
+  ema_decay: 0.98
+  ema_start_epoch: 30
+
+journal:
+  path: LAB_JOURNAL.md
+  run_name: elliptic_graphsage_tabddpm_template_alpha075
