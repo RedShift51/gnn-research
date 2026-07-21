@@ -385,6 +385,15 @@ def run_from_config(config: dict, config_path: str, git_commit: str | None = Non
     else:
         raise ValueError(f"Unknown train.lr_schedule: {lr_schedule!r} (expected 'none' or 'cosine')")
 
+    # DropEdge (Rong et al. 2020) -- opt-in only (train.drop_edge_rate, default 0, existing configs
+    # unaffected). A genuinely different graph-augmentation angle than TabDDPM's synthetic-node
+    # injection: randomly masks a fraction of TRAIN edges on every forward pass (re-drawn each
+    # epoch), a structural perturbation of the REAL graph rather than inventing new nodes/edges --
+    # sidesteps the "where do synthetic edges go" problem (Run 44/45's template-attach found no
+    # real effect either way) entirely, since nothing new is added. Standard regularizer against
+    # overfitting to specific edges / over-smoothing. 2026-07-21 discussion.
+    drop_edge_rate = config["train"].get("drop_edge_rate", 0.0)
+
     # AUC-ROC (threshold-independent) is a much less noisy early-stopping signal than F1-macro
     # at a fixed 0.5 threshold: under heavy class imbalance, F1@0.5 can stay flat for many epochs
     # while the model is still learning to rank fraud higher, then jump once probabilities cross
@@ -403,11 +412,17 @@ def run_from_config(config: dict, config_path: str, git_commit: str | None = Non
             optimizer.zero_grad()
             # train_edge_index, NOT edge_index — the training forward pass must never see
             # val/test-period edges (see data/temporal_edges.py; arXiv 2604.19514).
-            logits = model(data.x, data.train_edge_index)
+            epoch_train_edge_index = data.train_edge_index
+            if drop_edge_rate > 0:
+                # Re-drawn every epoch (not once, fixed) -- the point is exposing the model to a
+                # different random subgraph each step, same rationale as standard DropEdge.
+                keep_mask = torch.rand(epoch_train_edge_index.shape[1], device=device) >= drop_edge_rate
+                epoch_train_edge_index = epoch_train_edge_index[:, keep_mask]
+            logits = model(data.x, epoch_train_edge_index)
             loss = criterion(logits[data.train_mask], data.y[data.train_mask])
             if gate_aux_weight > 0 and hasattr(model, "gate_logits"):
-                gate_logits = model.gate_logits(data.x, data.train_edge_index)
-                src, dst = data.train_edge_index[0], data.train_edge_index[1]
+                gate_logits = model.gate_logits(data.x, epoch_train_edge_index)
+                src, dst = epoch_train_edge_index[0], epoch_train_edge_index[1]
                 both_train = data.train_mask[src] & data.train_mask[dst]
                 if both_train.any():
                     same_class = (data.y[src] == data.y[dst]).float()
