@@ -56,15 +56,36 @@ def build_grid(base_config_path: str, param_grid: dict, run_name_fn=None) -> lis
     return jobs
 
 
+def _invoke_with_retry(endpoint_id, job_input, timeout, run_name, max_attempts=3):
+    """Some large full-batch configs (PaySim's full graph, hidden_dim=128) sit right at a 24GB
+    GPU's memory ceiling and OOM intermittently rather than deterministically — directly observed
+    the SAME config succeed and fail across repeated attempts, not tied to any code difference.
+    Retrying lands a clean result most of the time without needing to shrink model capacity or
+    rearchitect full-batch training into mini-batch (PaySim's own established fix for GAT) just to
+    chase an intermittent failure. Each retry gets a fresh worker via RunPod's own scheduling, and
+    the worker-kill-on-OOM fix (serverless/handler.py) prevents a poisoned worker from being handed
+    the retry."""
+    last_error = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return invoke(endpoint_id, job_input, timeout)
+        except Exception as e:
+            last_error = e
+            logger.warning(f"[{run_name}] attempt {attempt}/{max_attempts} failed: {e}")
+    raise last_error
+
+
 def run_sweep(endpoint_id: str, base_config_path: str, param_grid: dict,
-              max_workers: int = 4, timeout: int = 3600, preprocess: bool = True) -> dict:
+              max_workers: int = 4, timeout: int = 3600, preprocess: bool = True,
+              max_attempts: int = 3) -> dict:
     jobs = build_grid(base_config_path, param_grid)
     logger.info(f"Dispatching {len(jobs)} jobs ({', '.join(param_grid.keys())} grid) to endpoint {endpoint_id}...")
 
     results = {}
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         future_to_job = {
-            pool.submit(invoke, endpoint_id, {"config_dict": config, "preprocess": preprocess}, timeout):
+            pool.submit(_invoke_with_retry, endpoint_id, {"config_dict": config, "preprocess": preprocess},
+                        timeout, run_name, max_attempts):
                 (run_name, point)
             for run_name, config, point in jobs
         }
@@ -78,7 +99,7 @@ def run_sweep(endpoint_id: str, base_config_path: str, param_grid: dict,
                             f"test_f1={test.get('f1_macro')} test_auc={test.get('auc_roc')}")
             except Exception as e:
                 results[run_name] = {"point": point, "error": str(e)}
-                logger.error(f"[{run_name}] FAILED — point={point}: {e}")
+                logger.error(f"[{run_name}] FAILED after {max_attempts} attempts — point={point}: {e}")
     return results
 
 
@@ -106,6 +127,7 @@ def main() -> None:
     parser.add_argument("--grid", required=True, help='JSON dict, e.g. \'{"loss.alpha": [0.25, 0.5]}\'')
     parser.add_argument("--max-workers", type=int, default=4)
     parser.add_argument("--timeout", type=int, default=3600)
+    parser.add_argument("--max-attempts", type=int, default=3)
     parser.add_argument("--no-preprocess", action="store_true")
     args = parser.parse_args()
 
@@ -114,6 +136,7 @@ def main() -> None:
     results = run_sweep(
         args.endpoint_id, args.base_config, param_grid,
         max_workers=args.max_workers, timeout=args.timeout, preprocess=not args.no_preprocess,
+        max_attempts=args.max_attempts,
     )
     print_summary(results)
 
