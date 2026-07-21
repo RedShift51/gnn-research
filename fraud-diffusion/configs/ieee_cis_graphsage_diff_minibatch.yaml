@@ -42,6 +42,9 @@ train:
   batch_size: 1024
   num_neighbors: [15, 10]
 
+debug:
+  return_test_predictions: true
+
 journal:
   path: LAB_JOURNAL.md
   run_name: ieee_cis_graphsage_diff_minibatch

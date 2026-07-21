@@ -173,9 +173,13 @@ def evaluate(model, data, mask, device, edge_index=None) -> dict:
     return compute_metrics(y_true, probs)
 
 
-def evaluate_batched(model, loader, device) -> dict:
+def evaluate_batched(model, loader, device, return_raw=False):
     """Mini-batch evaluation via NeighborLoader — only the seed nodes in each batch (the first
-    `batch.batch_size` nodes) are scored; the rest are sampled neighbors providing context."""
+    `batch.batch_size` nodes) are scored; the rest are sampled neighbors providing context.
+    With return_raw=True, also returns the per-node probs/y_true (in the loader's seed-node
+    order — matches data.test_mask's True-position order for a shuffle=False loader whose
+    input_nodes is that same boolean mask, the mini-batch analogue of evaluate()'s boolean-mask
+    order used by debug.return_test_predictions)."""
     model.eval()
     all_probs, all_y = [], []
     with torch.no_grad():
@@ -188,7 +192,10 @@ def evaluate_batched(model, loader, device) -> dict:
             all_y.append(seed_y.cpu())
     probs = torch.cat(all_probs).numpy()
     y_true = torch.cat(all_y).numpy()
-    return compute_metrics(y_true, probs)
+    metrics = compute_metrics(y_true, probs)
+    if return_raw:
+        return metrics, probs, y_true
+    return metrics
 
 
 def train_epoch_batched(model, loader, criterion, optimizer, device) -> float:
@@ -489,7 +496,15 @@ def run_from_config(config: dict, config_path: str, git_commit: str | None = Non
     test_predictions = None
     if mini_batch:
         val_metrics = evaluate_batched(model, val_loader, device)
-        test_metrics = evaluate_batched(model, test_loader, device)
+        if config.get("debug", {}).get("return_test_predictions", False):
+            # Same contract as the non-mini_batch branch below, but sourced from test_loader's
+            # seed-node order — valid because test_loader is built with shuffle=False and
+            # input_nodes=data.test_mask (see _graph_view call above), so its seed-node order
+            # matches data.test_mask's True-position order exactly.
+            test_metrics, test_probs, test_y = evaluate_batched(model, test_loader, device, return_raw=True)
+            test_predictions = {"probs": test_probs.tolist(), "y_true": test_y.tolist()}
+        else:
+            test_metrics = evaluate_batched(model, test_loader, device)
     else:
         val_metrics = evaluate(model, data, data.val_mask, device, edge_index=data.val_edge_index)
         # Moved to GPU just-in-time — see the setup comment above for why this isn't kept
