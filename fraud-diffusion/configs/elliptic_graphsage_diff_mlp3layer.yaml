@@ -1,0 +1,39 @@
+seed: 42
+
+data:
+  dataset: elliptic
+  raw_dir: data/raw/elliptic/elliptic_bitcoin_dataset
+  processed_path: data/processed/elliptic_graph.pt
+  train_end_step: 34
+  val_end_step: 41
+
+# GraphSAGEDiff with a stronger (MLP) classifier head AND a deeper GNN (3 layers instead of 2) --
+# per 2026-07-21 discussion, testing the "pure GNN" path to closing the RF gap: is it specifically
+# tree-based inductive bias (RF) that helps, or classifier expressiveness in general (which a
+# neural MLP head should also capture, staying entirely within the GNN family)? Also tests
+# whether more message-passing hops help now that GraphSAGEDiff's explicit deviation feature
+# already addresses some of the homophily-dilution problem (LAB_JOURNAL.md Run 46/49/50).
+model:
+  name: graphsage_diff
+  hidden_dim: 128
+  num_layers: 3
+  dropout: 0.5
+  classifier_hidden_dim: 64
+
+loss:
+  name: focal
+  alpha: 0.25
+  gamma: 2.0
+
+train:
+  lr: 0.001
+  weight_decay: 0.00001
+  epochs: 1000
+  patience: 50
+  device: auto
+  ema_decay: 0.98
+  ema_start_epoch: 30
+
+journal:
+  path: LAB_JOURNAL.md
+  run_name: elliptic_graphsage_diff_mlp3layer
