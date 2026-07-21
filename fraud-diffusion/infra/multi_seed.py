@@ -116,6 +116,28 @@ def compare(endpoint_id: str, config_a_path: str, config_b_path: str, seeds: lis
     }
 
 
+def format_report(result: dict, label_a: str, label_b: str, metric: str = "f1_macro") -> str:
+    """Ready-to-paste markdown for a LAB_JOURNAL.md run entry -- removes the "hand-build the
+    table each time" friction that kept turning "test a candidate" into a two-step manual dance
+    (quick single-seed check, then remember to multi-seed it properly). Call this immediately
+    after compare() instead of hand-formatting the summary/Wilcoxon dict."""
+    sa, sb = result["config_a"]["summary"], result["config_b"]["summary"]
+    w = result["wilcoxon"] or {}
+    lines = [
+        f"| Config | Mean {metric} | Std | n |",
+        "|---|---|---|---|",
+        f"| {label_a} | {sa['mean']:.4f} | {sa['std']:.4f} | {sa['n']} |",
+        f"| {label_b} | {sb['mean']:.4f} | {sb['std']:.4f} | {sb['n']} |",
+        "",
+    ]
+    if "p_value" in w:
+        lines.append(f"Wilcoxon signed-rank: statistic={w['statistic']:.2f}, "
+                      f"p={w['p_value']:.4f}, n_pairs={w['n_pairs']}")
+    elif w:
+        lines.append(f"Wilcoxon signed-rank: {w}")
+    return "\n".join(lines)
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     parser = argparse.ArgumentParser()
@@ -151,9 +173,7 @@ def main() -> None:
     elif args.command == "compare":
         result = compare(args.endpoint_id, args.config_a, args.config_b, seeds,
                           args.metric, args.split, args.max_workers, args.timeout, not args.no_preprocess)
-        print(f"Config A ({args.config_a}): {result['config_a']['summary']}")
-        print(f"Config B ({args.config_b}): {result['config_b']['summary']}")
-        print(f"Wilcoxon signed-rank: {result['wilcoxon']}")
+        print(format_report(result, args.config_a, args.config_b, args.metric))
 
 
 if __name__ == "__main__":

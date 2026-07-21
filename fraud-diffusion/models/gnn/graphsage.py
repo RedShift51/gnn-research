@@ -5,10 +5,27 @@ from torch_geometric.nn import SAGEConv
 from torch_geometric.utils import scatter
 
 
+def _build_classifier(hidden_dim: int, classifier_hidden_dim: int | None, dropout: float) -> nn.Module:
+    """Plain nn.Linear (default, backward compatible) or a small MLP head if classifier_hidden_dim
+    is set -- a neural (still purely GNN-family) way of adding the same nonlinear feature-
+    combination power the GNN+RF hybrid gets from swapping in RandomForestClassifier (Run 53/55),
+    to test whether the RF gap is specifically about tree-based inductive bias or just about
+    classifier expressiveness in general (2026-07-21 discussion)."""
+    if classifier_hidden_dim is None:
+        return nn.Linear(hidden_dim, 1)
+    return nn.Sequential(
+        nn.Linear(hidden_dim, classifier_hidden_dim),
+        nn.ReLU(),
+        nn.Dropout(dropout),
+        nn.Linear(classifier_hidden_dim, 1),
+    )
+
+
 class GraphSAGE(nn.Module):
     """2-layer GraphSAGE node classifier (binary fraud logit)."""
 
-    def __init__(self, in_dim: int, hidden_dim: int = 128, num_layers: int = 2, dropout: float = 0.3):
+    def __init__(self, in_dim: int, hidden_dim: int = 128, num_layers: int = 2, dropout: float = 0.3,
+                 classifier_hidden_dim: int | None = None):
         super().__init__()
         assert num_layers >= 1
 
@@ -18,7 +35,7 @@ class GraphSAGE(nn.Module):
             self.convs.append(SAGEConv(hidden_dim, hidden_dim))
 
         self.dropout = dropout
-        self.classifier = nn.Linear(hidden_dim, 1)
+        self.classifier = _build_classifier(hidden_dim, classifier_hidden_dim, dropout)
 
     def embed(self, x: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
         """Node embeddings (last hidden layer, pre-classifier) — for the GNN-embeddings+RF hybrid
@@ -50,7 +67,8 @@ class GraphSAGEDiff(nn.Module):
     (vs an ~11.6% random-chance baseline) -- real fraud-clustering signal exists but is a minority
     of a typical fraud node's edges, exactly what naive mean-aggregation dilutes away."""
 
-    def __init__(self, in_dim: int, hidden_dim: int = 128, num_layers: int = 2, dropout: float = 0.3):
+    def __init__(self, in_dim: int, hidden_dim: int = 128, num_layers: int = 2, dropout: float = 0.3,
+                 classifier_hidden_dim: int | None = None):
         super().__init__()
         assert num_layers >= 1
 
@@ -60,7 +78,7 @@ class GraphSAGEDiff(nn.Module):
             self.convs.append(SAGEConv(hidden_dim, hidden_dim))
 
         self.dropout = dropout
-        self.classifier = nn.Linear(hidden_dim, 1)
+        self.classifier = _build_classifier(hidden_dim, classifier_hidden_dim, dropout)
 
     def embed(self, x: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
         """See GraphSAGE.embed's docstring — same rationale, for the GNN-embeddings+RF hybrid."""
