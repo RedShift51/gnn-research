@@ -1,0 +1,55 @@
+seed: 42
+
+data:
+  raw_csv: data/raw/paysim.csv
+  processed_path: data/processed/paysim_graph_full.pt
+  augmented_processed_path: data/processed/paysim_graph_full_diffusion_augmented.pt
+  fraud_types: [TRANSFER, CASH_OUT]
+  subsample_size: 5000000
+  max_node_degree: 20
+  train_frac: 0.70
+  val_frac: 0.15
+  test_frac: 0.15
+
+diffusion:
+  num_timesteps: 1000
+  hidden_dim: 128
+  lr: 0.001
+  epochs: 1000
+  batch_size: 256
+  log_every: 25
+  model_path: models/diffusion/tabddpm_paysim_full.pt
+
+augment:
+  n_synthetic: 3643
+  sampler: ddim
+  ddim_steps: 50
+  k_connections: 5
+
+# Combining the two best-known ingredients per 2026-07-21 discussion: Run 28's best alpha (0.95,
+# still climbing at the epoch cap there) + Run 29's diffusion augmentation (which used alpha=0.25
+# and only beat its OWN comparable baseline, not the alpha-tuned results). This is the real test
+# of whether diffusion adds anything once the loss-weighting win is already banked.
+model:
+  name: graphsage
+  hidden_dim: 128
+  num_layers: 2
+  dropout: 0.5
+
+loss:
+  name: focal
+  alpha: 0.95
+  gamma: 2.0
+
+train:
+  lr: 0.001
+  weight_decay: 0.00001
+  epochs: 1000
+  patience: 50
+  device: auto
+  ema_decay: 0.98
+  ema_start_epoch: 30
+
+journal:
+  path: LAB_JOURNAL.md
+  run_name: full_graphsage_tabddpm_alpha095
