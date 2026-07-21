@@ -298,6 +298,19 @@ def run_from_config(config: dict, config_path: str, git_commit: str | None = Non
         weight_decay=config["train"]["weight_decay"],
     )
 
+    # Opt-in only (train.lr_schedule, default "none") — existing configs are unaffected. Added
+    # because several high-alpha PaySim runs hit the epoch cap without ever plateauing (Runs
+    # 24-31 predate wandb, so this was only visible in printed logs, not a full curve) — a decaying
+    # LR is the standard fix for a model that's still improving late in a fixed epoch budget,
+    # worth testing directly now that wandb can actually confirm whether it helps.
+    lr_schedule = config["train"].get("lr_schedule", "none")
+    if lr_schedule == "cosine":
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config["train"]["epochs"])
+    elif lr_schedule == "none":
+        scheduler = None
+    else:
+        raise ValueError(f"Unknown train.lr_schedule: {lr_schedule!r} (expected 'none' or 'cosine')")
+
     # AUC-ROC (threshold-independent) is a much less noisy early-stopping signal than F1-macro
     # at a fixed 0.5 threshold: under heavy class imbalance, F1@0.5 can stay flat for many epochs
     # while the model is still learning to rank fraud higher, then jump once probabilities cross
@@ -322,6 +335,9 @@ def run_from_config(config: dict, config_path: str, git_commit: str | None = Non
             optimizer.step()
             loss = loss.item()
 
+        if scheduler is not None:
+            scheduler.step()
+
         if ema_decay > 0 and epoch == ema_start_epoch:
             ema = EMA(model, decay=ema_decay)               # snapshot current (warmed-up) weights
             eval_model = build_model(config, in_dim=data.x.shape[1]).to(device)
@@ -345,8 +361,9 @@ def run_from_config(config: dict, config_path: str, git_commit: str | None = Non
         else:
             epochs_since_improve += 1
 
-        logger.info(f"Epoch {epoch:3d} | loss={loss:.4f} | val_auc_roc={val_metrics['auc_roc']:.4f} | val_f1_macro={val_metrics['f1_macro']:.4f}")
-        wandb.log({"epoch": epoch, "train_loss": loss, "val": val_metrics}, step=epoch)
+        current_lr = optimizer.param_groups[0]["lr"]
+        logger.info(f"Epoch {epoch:3d} | loss={loss:.4f} | lr={current_lr:.6f} | val_auc_roc={val_metrics['auc_roc']:.4f} | val_f1_macro={val_metrics['f1_macro']:.4f}")
+        wandb.log({"epoch": epoch, "train_loss": loss, "lr": current_lr, "val": val_metrics}, step=epoch)
 
         # Guard against stopping before EMA ever gets a chance to run: without this, a plateau in
         # the raw model right around ema_start_epoch (exactly what happened in LAB_JOURNAL Run 17
