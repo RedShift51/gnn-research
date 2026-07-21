@@ -1,0 +1,63 @@
+seed: 42
+
+data:
+  dataset: elliptic
+  raw_dir: data/raw/elliptic/elliptic_bitcoin_dataset
+  processed_path: data/processed/elliptic_graph.pt
+  augmented_processed_path: data/processed/elliptic_graph_diffusion_adversarial_lowdisclr_augmented.pt
+  train_end_step: 34
+  val_end_step: 41
+
+diffusion:
+  num_timesteps: 1000
+  hidden_dim: 128
+  lr: 0.001
+  epochs: 1000
+  batch_size: 256
+  log_every: 25
+  model_path: models/diffusion/tabddpm_elliptic_adversarial_lowdisclr.pt
+  # Same as elliptic_diffusion_adversarial.yaml, EXCEPT discriminator_lr is 10x lower than the
+  # denoiser's own lr. Diagnosis from the first attempt's wandb curves (via a 20-epoch local
+  # smoke test, matching what the real run's own trajectory almost certainly showed too): loss_disc
+  # steadily DECREASED while loss_adv steadily INCREASED and loss_denoise got WORSE once the
+  # adversarial phase started -- the textbook "discriminator winning too fast" GAN pathology, where
+  # a discriminator that learns faster than the generator can adapt turns the adversarial term into
+  # noise that drags the denoiser off its primary objective. Standard fix: slow the discriminator
+  # down relative to the generator.
+  adversarial:
+    enabled: true
+    start_epoch: 500
+    lambda_adv: 0.1
+    discriminator_hidden_dim: 128
+    discriminator_lr: 0.0001
+
+augment:
+  n_synthetic: 1731
+  sampler: ddim
+  ddim_steps: 50
+  k_connections: 5
+  clamp_std: 3.0
+
+model:
+  name: graphsage
+  hidden_dim: 128
+  num_layers: 2
+  dropout: 0.5
+
+loss:
+  name: focal
+  alpha: 0.75
+  gamma: 2.0
+
+train:
+  lr: 0.001
+  weight_decay: 0.00001
+  epochs: 1000
+  patience: 50
+  device: auto
+  ema_decay: 0.98
+  ema_start_epoch: 30
+
+journal:
+  path: LAB_JOURNAL.md
+  run_name: elliptic_graphsage_tabddpm_adversarial_lowdisclr_alpha075
