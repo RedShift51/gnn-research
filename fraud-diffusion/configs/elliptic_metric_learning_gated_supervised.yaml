@@ -1,0 +1,41 @@
+seed: 42
+
+data:
+  dataset: elliptic
+  raw_dir: data/raw/elliptic/elliptic_bitcoin_dataset
+  processed_path: data/processed/elliptic_graph.pt
+  train_end_step: 34
+  val_end_step: 41
+
+# GraphSAGEGated (CARE-GNN-style per-edge sigmoid gate) + camo-weighted metric learning +
+# DIRECT gate supervision against y_src==y_dst on known-labeled training edges.
+# Two independent fixes combined: (1) the gate previously only got an indirect signal through the
+# classification loss (Runs 59-61: no real effect) -- gate_aux_weight supervises it directly,
+# implemented in train_gnn.py but never actually run as a logged experiment; (2) BCE/focal
+# classification is this investigation's consistently weaker objective vs. metric learning on
+# Elliptic (camo-weighted: 12-27% hard-core recovery, 5-seed confirmed) -- using camo_weighted
+# mining as the main loss instead of BCE, on the theory that BCE isn't a good enough objective for
+# this task's rare/camouflaged-minority structure, so a gated encoder might not get a fair test
+# under it either.
+model:
+  name: graphsage_gated
+  hidden_dim: 128
+  num_layers: 2
+  dropout: 0.5
+
+train:
+  lr: 0.001
+  weight_decay: 0.00001
+  epochs: 1000
+  patience: 50
+  device: auto
+
+metric_learning:
+  enabled: true
+  margin: 1.0
+  mining: camo_weighted
+  gate_aux_weight: 1.0
+
+journal:
+  path: LAB_JOURNAL.md
+  run_name: elliptic_metric_learning_gated_supervised

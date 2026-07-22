@@ -162,7 +162,15 @@ class GraphSAGESpectral(nn.Module):
     frequency views). Consecutive differences b_k = h_k - h_{k+1} isolate the signal specific to
     each scale (b_0 IS GraphSAGEDiff's original single-hop deviation feature); the final h_K is the
     purely low-frequency (smoothest) band. A learnable per-band scalar gain lets training decide how
-    much to weigh each frequency band rather than hard-coding equal weight."""
+    much to weigh each frequency band rather than hard-coding equal weight.
+
+    Includes raw x itself as its own band (2026-07-22 fix) -- Run 62 found the original version
+    (bands = differences and smoothed copies only, never untouched x) lost in 5/5 seeds, and
+    root-caused it to exactly this gap: GraphSAGEDiff always keeps raw x as one of its three
+    concatenated terms, and RF's own advantage partly comes from exploiting raw feature VALUES
+    directly, not just graph-relative quantities -- stripping direct access to x before the first
+    layer plausibly threw away the same signal GraphSAGEDiff's "keep x as-is" choice protects.
+    Never re-tested with this fix until now."""
 
     def __init__(self, in_dim: int, hidden_dim: int = 128, num_layers: int = 2, dropout: float = 0.3,
                  classifier_hidden_dim: int | None = None, feature_encoder_hidden_dim: int | None = None,
@@ -173,9 +181,9 @@ class GraphSAGESpectral(nn.Module):
         self.num_bands = num_bands
 
         self.encoder, conv_in_dim = _build_encoder(in_dim, feature_encoder_hidden_dim, dropout)
-        self.band_weights = nn.Parameter(torch.ones(num_bands + 1))  # +1 for the final low-freq band
+        self.band_weights = nn.Parameter(torch.ones(num_bands + 2))  # +1 low-freq band, +1 raw-x band
         self.convs = nn.ModuleList()
-        self.convs.append(SAGEConv(conv_in_dim * (num_bands + 1), hidden_dim))
+        self.convs.append(SAGEConv(conv_in_dim * (num_bands + 2), hidden_dim))
         for _ in range(num_layers - 1):
             self.convs.append(SAGEConv(hidden_dim, hidden_dim))
 
@@ -193,7 +201,7 @@ class GraphSAGESpectral(nn.Module):
             x = self.encoder(x)
         n = x.shape[0]
         h = x
-        bands = []
+        bands = [self.band_weights[-2] * x]  # raw x, untouched -- the Run 62 fix
         for k in range(self.num_bands):
             h_next = self._propagate_mean(h, edge_index, n)
             bands.append(self.band_weights[k] * (h - h_next))

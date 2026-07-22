@@ -309,7 +309,8 @@ def _align_uniform_loss(embeddings: torch.Tensor, fraud_idx: torch.Tensor, legit
 
 def run(config: dict, n_triplets_per_epoch: int = 2000, margin: float = 1.0,
         compression_weight: float = 0.0, return_embeddings: bool = False, mining: str = "random",
-        temperature: float = 0.1, align_weight: float = 1.0, uniform_weight: float = 1.0) -> dict:
+        temperature: float = 0.1, align_weight: float = 1.0, uniform_weight: float = 1.0,
+        gate_aux_weight: float = 0.0) -> dict:
     wandb_run = init_wandb(config, "metric_learning")
     set_seed(config["seed"])
     device = pick_device(config["train"]["device"])
@@ -514,6 +515,21 @@ def run(config: dict, n_triplets_per_epoch: int = 2000, margin: float = 1.0,
             if compression_weight > 0:
                 comp_loss = _compression_loss(embeddings, train_fraud_idx.to(device), train_legit_idx.to(device))
                 loss = loss + compression_weight * comp_loss
+            if gate_aux_weight > 0 and hasattr(model, "gate_logits"):
+                # Directly supervises GraphSAGEGated's per-edge gate against y_src==y_dst on
+                # known-labeled training edges -- same mechanism as train_gnn.py's
+                # loss.gate_auxiliary_weight, never actually run as an experiment before (the gate
+                # previously only got an indirect signal through the main classification loss,
+                # Runs 59-61, and showed no real effect). Combined here with a metric-learning main
+                # objective instead of BCE/focal classification, since metric learning is this
+                # investigation's only confirmed lever that beats plain classification on Elliptic.
+                gate_logits = model.gate_logits(data.x, data.train_edge_index)
+                src, dst = data.train_edge_index[0], data.train_edge_index[1]
+                both_train = data.train_mask[src] & data.train_mask[dst]
+                if both_train.any():
+                    same_class = (data.y[src] == data.y[dst]).float()
+                    gate_loss = F.binary_cross_entropy_with_logits(gate_logits[both_train], same_class[both_train])
+                    loss = loss + gate_aux_weight * gate_loss
             loss.backward()
             optimizer.step()
 
