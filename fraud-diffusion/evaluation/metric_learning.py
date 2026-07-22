@@ -406,6 +406,10 @@ def run(config: dict, n_triplets_per_epoch: int = 2000, margin: float = 1.0,
         # estimated), which fails SILENTLY rather than raising a clear error. Fixed by keeping ALL
         # fraud (rare, most important, small in absolute count) but subsampling legit, plus
         # rounding to 5 decimals -- cuts payload by roughly an order of magnitude.
+        # REOPENED (2026-07-22): "small" was an Elliptic-specific assumption (~3462 train fraud).
+        # IEEE-CIS has ~14538 train fraud -- reproduced the exact same silent COMPLETED-with-
+        # output=None failure. Cap train fraud the same way legit already is, instead of assuming
+        # any dataset's fraud count is inherently small.
         rng = np.random.default_rng(config["seed"])
         test_y_np = test_y
         test_fraud_pos = np.where(test_y_np == 1)[0]
@@ -414,13 +418,14 @@ def run(config: dict, n_triplets_per_epoch: int = 2000, margin: float = 1.0,
         test_keep = np.sort(np.concatenate([test_fraud_pos, test_legit_sample]))
 
         legit_idx_sample = rng.choice(len(train_legit_emb), size=min(1500, len(train_legit_emb)), replace=False)
+        fraud_idx_sample = rng.choice(len(train_fraud_emb), size=min(4000, len(train_fraud_emb)), replace=False)
 
         def _round(arr):
             return np.round(arr, 5).tolist()
 
         result["test_embeddings"] = _round(test_emb_masked[test_keep].cpu().numpy())
         result["test_embeddings_y"] = test_y_np[test_keep].tolist()
-        result["train_fraud_embeddings"] = _round(train_fraud_emb.cpu().numpy())  # small (~3462), kept in full
+        result["train_fraud_embeddings"] = _round(train_fraud_emb[fraud_idx_sample].cpu().numpy())
         result["train_legit_embeddings"] = _round(train_legit_emb[legit_idx_sample].cpu().numpy())
     return result
 
