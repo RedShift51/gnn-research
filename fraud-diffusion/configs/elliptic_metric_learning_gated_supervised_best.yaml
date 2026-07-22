@@ -1,0 +1,26 @@
+seed: 42
+data:
+  dataset: elliptic
+  raw_dir: data/raw/elliptic/elliptic_bitcoin_dataset
+  processed_path: data/processed/elliptic_graph.pt
+  train_end_step: 34
+  val_end_step: 41
+model:
+  name: graphsage_gated
+  hidden_dim: 128
+  num_layers: 2
+  dropout: 0.5
+train:
+  lr: 0.001
+  weight_decay: 1.0e-05
+  epochs: 1000
+  patience: 50
+  device: auto
+metric_learning:
+  enabled: true
+  margin: 1.0
+  mining: camo_weighted
+  gate_aux_weight: 0.25
+journal:
+  path: LAB_JOURNAL.md
+  run_name: elliptic_metric_learning_gated_supervised
