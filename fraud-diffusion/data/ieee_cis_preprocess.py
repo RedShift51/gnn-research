@@ -13,12 +13,18 @@ Edges  = pairs of transactions sharing an entity key (card1 or addr1 -- common p
          held by very many transactions; a full clique would blow up the graph).
 Split  = temporal (sorted by TransactionDT, seconds since an arbitrary reference point), not random.
 
-Feature scope (deliberate MVP-slice decision, not a limitation of the format): TransactionAmt,
-ProductCD, card1-card6, addr1/addr2, dist1/dist2, P_emaildomain/R_emaildomain, C1-C14, D1-D15,
-M1-M9, plus DeviceType/DeviceInfo from the identity table. The 339 anonymized V-columns are
-SKIPPED for this first slice (heavy missingness, mostly-correlated blocks, would roughly triple
-feature count) -- can be added later as an enrichment pass, consistent with this project's
-established "MVP slice first, expand later" pattern (see PaySim's original scope decision).
+Feature scope: TransactionAmt, ProductCD, card1-card6, addr1/addr2, dist1/dist2,
+P_emaildomain/R_emaildomain, C1-C14, D1-D15, M1-M9, DeviceType/DeviceInfo from the identity table,
+plus V1-V339 EXCEPT V322-V339 (2026-07-22 enrichment pass over the original MVP slice, which
+skipped all V-columns). The V322-V339 exclusion isn't a guess -- the competition's 1st-place
+writeup (Yakovlev & Deotte, "1st Place Solution - Part 2") explicitly found that block failed their
+"time consistency" check (trained on one month, evaluated forward on a later month, per-feature) --
+i.e. it looked informative on the training period but didn't generalize forward in time, the exact
+failure mode this whole investigation has been chasing on Elliptic. No reason to reintroduce a
+documented bad block. Naive fillna(-999) + StandardScaler for the rest, matching this codebase's
+existing convention for D-columns -- the winning solution went further (per-UID-group PCA/
+dedup/averaging of correlated V-blocks, plus UID-based aggregate features), which is a separate,
+bigger lever than just including the raw columns and not yet implemented here.
 """
 
 import argparse
@@ -41,6 +47,7 @@ NUMERIC_COLS = (
     ["TransactionAmt"]
     + [f"C{i}" for i in range(1, 15)]
     + [f"D{i}" for i in range(1, 16)]
+    + [f"V{i}" for i in range(1, 340) if i < 322 or i > 339]  # V322-V339 excluded, see module docstring
 )
 # Treated as frequency-encoded IDs, not one-hot -- card1 alone has >10k unique values, one-hot
 # would explode dimensionality; frequency (count in TRAIN) is a standard, leakage-safe way to turn
@@ -126,6 +133,68 @@ def build_entity_sequences(df: pd.DataFrame, entity_col: str, seq_len: int) -> n
     return seq_idx
 
 
+def build_uid_features(df: pd.DataFrame, train_mask: np.ndarray) -> tuple:
+    """Client (UID) reconstruction + causal aggregate features + target encoding -- the actual
+    winning insight from this competition (Yakovlev/Deotte 1st place: local val AUC 0.9245 ->
+    0.9377 from UIDs ALONE, more than the raw V-columns gave; Bryansky/CPMP/Giba 2nd place, same
+    finding independently). IEEE-CIS has no direct user id, but card1+addr1+P_emaildomain+
+    (day-D1) -- an inferred "account creation day" anchor, since D1 tracks days-since-first-seen
+    for a card -- reconstructs client identity with enough precision for uid-level features to
+    matter far more than almost anything else tried. Neither winning team used a neural network or
+    GNN at all -- plain LightGBM/XGBoost/CatBoost on these features won.
+
+    CAUSAL by construction -- deliberately NOT the 2nd-place writeup's own recipe, which uses
+    gr.TransactionDT.shift(-1) (the NEXT transaction's timing) for aggregate features: for a
+    train-period row, "next transaction" can be a val/test-period one that doesn't exist yet at
+    real scoring time, the same leakage class data/temporal_edges.py exists to prevent elsewhere
+    in this codebase. Only ever looks at STRICTLY EARLIER same-uid rows in the globally
+    time-sorted df, same convention as build_entity_sequences.
+
+    Returns (features [n, 5] float32, uid Series) -- uid is returned too since build_edges/
+    build_entity_sequences could be pointed at it as an additional entity column later."""
+    n = len(df)
+    day = (df["TransactionDT"] // 86400).astype(int)
+    d1_anchor = day - df["D1"].fillna(0).astype(int)
+    uid = (
+        df["card1"].astype(str) + "_" + df["addr1"].astype(str) + "_"
+        + d1_anchor.astype(str) + "_" + df["P_emaildomain"].astype(str)
+    )
+
+    prior_count = np.zeros(n, dtype=np.float32)
+    time_since_prev = np.full(n, -1.0, dtype=np.float32)  # -1 sentinel: no prior same-uid transaction
+    prev_amt_mean = np.full(n, -1.0, dtype=np.float32)
+    prev_amt_std = np.zeros(n, dtype=np.float32)
+
+    dt = df["TransactionDT"].to_numpy()
+    amt = df["TransactionAmt"].to_numpy()
+
+    for _, group in df.groupby(uid).groups.items():
+        idxs = sorted(group)
+        for pos, i in enumerate(idxs):
+            prior_count[i] = pos
+            if pos > 0:
+                prev_idxs = idxs[:pos]
+                time_since_prev[i] = dt[i] - dt[idxs[pos - 1]]
+                prev_amt_mean[i] = amt[prev_idxs].mean()
+                if pos > 1:
+                    prev_amt_std[i] = amt[prev_idxs].std()
+
+    # Regularized target encoding (CPMP's recipe): TRAIN-only fraud rate per uid, shrunk toward the
+    # global TRAIN mean by frequency -- rare/unseen uids fall back toward the overall rate instead
+    # of a noisy small/zero-sample estimate. Never touches val/test labels.
+    train_y = df["isFraud"][train_mask]
+    train_uid = uid[train_mask]
+    global_mean = train_y.mean()
+    smoothing = 10.0
+    grp = train_y.groupby(train_uid)
+    uid_stats = grp.agg(["mean", "count"])
+    smoothed = (uid_stats["count"] * uid_stats["mean"] + smoothing * global_mean) / (uid_stats["count"] + smoothing)
+    target_enc = uid.map(smoothed).fillna(global_mean).astype(np.float32).to_numpy()
+
+    features = np.stack([prior_count, time_since_prev, prev_amt_mean, prev_amt_std, target_enc], axis=1)
+    return features.astype(np.float32), uid
+
+
 def temporal_split_masks(n: int, train_frac: float, val_frac: float) -> tuple:
     """Same convention as data/paysim_preprocess.py's temporal_split_masks -- row position IS
     temporal position here (df sorted by TransactionDT before this runs)."""
@@ -186,6 +255,11 @@ def run_from_config(config: dict) -> Path:
                 f"val={df['isFraud'][val_mask].sum()} test={df['isFraud'][test_mask].sum()}")
 
     features = build_node_features(df, train_mask)
+    if data_cfg.get("uid_features", False):
+        uid_feats, _ = build_uid_features(df, train_mask)
+        logger.info(f"Built UID features: {uid_feats.shape[1]} columns "
+                    f"(prior_count, time_since_prev, prev_amt_mean, prev_amt_std, target_enc)")
+        features = np.concatenate([features, uid_feats], axis=1)
     scaler = StandardScaler()
     scaler.fit(features[train_mask])
     features = scaler.transform(features).astype(np.float32)
