@@ -28,6 +28,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import wandb
+from sklearn.mixture import GaussianMixture
 from torch_geometric.loader import NeighborLoader
 
 from evaluation.metrics import compute_metrics
@@ -157,8 +158,150 @@ def _compression_loss(embeddings: torch.Tensor, fraud_idx: torch.Tensor, legit_i
     return fraud_var + legit_var
 
 
+def _semi_hard_triplets(embeddings: torch.Tensor, fraud_idx: torch.Tensor, legit_idx: torch.Tensor,
+                         n_triplets: int, generator: torch.Generator) -> tuple:
+    """Semi-hard negative mining (Schroff et al. 2015, FaceNet). For each (anchor, positive) fraud
+    pair, picks the CLOSEST legit negative that's still farther than the positive
+    (d(a,n) > d(a,p)) -- violates the margin only slightly, giving a small but informative
+    gradient. This is the literature-standard middle ground between random sampling (_sample_
+    triplets: too easy, most triplets already satisfy the margin, weak gradient) and pure
+    batch-hard mining (_hard_triplets, Run 79: destabilized training badly, F1 crashed to 0.325,
+    from the non-stationary "hardest changes every epoch" dynamic) -- a gap this codebase never
+    actually tested despite having both extremes. Falls back to the single hardest (closest)
+    negative when no legit point is farther than the positive (rare, but must be handled)."""
+    anchor_idx = fraud_idx[torch.randint(0, len(fraud_idx), (n_triplets,), generator=generator)]
+    pos_idx = fraud_idx[torch.randint(0, len(fraud_idx), (n_triplets,), generator=generator)]
+    anchor_emb = embeddings[anchor_idx]
+    pos_emb = embeddings[pos_idx]
+    legit_emb = embeddings[legit_idx]
+
+    d_pos = (anchor_emb - pos_emb).pow(2).sum(-1).sqrt()
+    d_an = torch.cdist(anchor_emb, legit_emb)
+
+    semi_hard_mask = d_an > d_pos.unsqueeze(1)
+    d_an_masked = d_an.masked_fill(~semi_hard_mask, float("inf"))
+    semi_hard_local = d_an_masked.argmin(dim=1)
+    no_semi_hard = ~semi_hard_mask.any(dim=1)
+    if no_semi_hard.any():
+        hardest_local = d_an.argmin(dim=1)
+        semi_hard_local = torch.where(no_semi_hard, hardest_local, semi_hard_local)
+    neg_emb = legit_emb[semi_hard_local]
+    return anchor_emb, pos_emb, neg_emb
+
+
+def _fraud_prototypes(fraud_emb: torch.Tensor, legit_centroid: torch.Tensor) -> tuple:
+    """Fits a 2-component GMM on CURRENT fraud embeddings' distance-to-legit-centroid and returns
+    the two sub-cluster centroids (in embedding space) plus a label array aligned to fraud_emb's
+    own row order -- the obvious/camouflaged split from Run 81, recomputed live from whatever
+    embeddings are passed in (live training embeddings, or a val/test-view snapshot for eval, so
+    the split always reflects the CURRENT model rather than a stale one-time fit)."""
+    dist = (fraud_emb - legit_centroid).pow(2).sum(-1).sqrt().detach().cpu().numpy()
+    gmm = GaussianMixture(n_components=2, random_state=0, n_init=1).fit(dist.reshape(-1, 1))
+    labels = torch.from_numpy(gmm.predict(dist.reshape(-1, 1))).to(fraud_emb.device)
+    centroid_0 = fraud_emb[labels == 0].mean(dim=0)
+    centroid_1 = fraud_emb[labels == 1].mean(dim=0)
+    return centroid_0, centroid_1, labels
+
+
+def _sample_multi_prototype_triplets(fraud_idx: torch.Tensor, legit_idx: torch.Tensor, sub_labels: torch.Tensor,
+                                      n_triplets: int, generator: torch.Generator) -> tuple:
+    """Like _sample_triplets, but the positive is drawn from the SAME GMM sub-cluster as the
+    anchor (obvious-with-obvious, camo-with-camo) instead of any random fraud point -- directly
+    targets the multi-prototype idea motivated by Run 82's ArcFace catch: a single fraud centroid
+    forces one prototype onto a genuinely bimodal class, diluting the rare camouflaged archetype
+    into an average dominated by the obvious majority. Keeping each archetype's own positive pairs
+    within-cluster should keep both sub-clusters internally cohesive instead."""
+    sub_labels_cpu = sub_labels.cpu()
+    anchor_pos_in_fraud = torch.randint(0, len(fraud_idx), (n_triplets,), generator=generator)
+    anchor_idx = fraud_idx[anchor_pos_in_fraud]
+    anchor_sub_labels = sub_labels_cpu[anchor_pos_in_fraud]
+
+    pos_idx = torch.empty(n_triplets, dtype=torch.long)
+    for lbl in (0, 1):
+        mask = anchor_sub_labels == lbl
+        if not mask.any():
+            continue
+        pool = (sub_labels_cpu == lbl).nonzero(as_tuple=True)[0]
+        if len(pool) == 0:
+            pool = torch.arange(len(fraud_idx))  # degenerate fallback: GMM collapsed to one side
+        choice = pool[torch.randint(0, len(pool), (int(mask.sum()),), generator=generator)]
+        pos_idx[mask] = fraud_idx[choice]
+
+    neg_idx = legit_idx[torch.randint(0, len(legit_idx), (n_triplets,), generator=generator)]
+    return anchor_idx, pos_idx, neg_idx
+
+
+def _multi_centroid_scores(embeddings: torch.Tensor, obvious_centroid: torch.Tensor,
+                            camo_centroid: torch.Tensor, legit_centroid: torch.Tensor) -> np.ndarray:
+    """Nearest-of-3 classification for the multi-prototype variant: fraud-likeness is distance to
+    legit vs. distance to the CLOSER of the two fraud sub-centroids, not one blended fraud
+    centroid."""
+    dist_legit = (embeddings - legit_centroid).pow(2).sum(-1).sqrt()
+    dist_obvious = (embeddings - obvious_centroid).pow(2).sum(-1).sqrt()
+    dist_camo = (embeddings - camo_centroid).pow(2).sum(-1).sqrt()
+    dist_fraud = torch.minimum(dist_obvious, dist_camo)
+    return torch.sigmoid(dist_legit - dist_fraud).cpu().numpy()
+
+
+def _supcon_loss(embeddings: torch.Tensor, batch_idx: torch.Tensor, batch_labels: torch.Tensor,
+                  temperature: float = 0.1) -> torch.Tensor:
+    """Supervised Contrastive Loss (Khosla et al. 2020). Pulls every anchor toward ALL same-label
+    points in the batch and pushes it from ALL different-label points simultaneously, unlike
+    triplet loss's one-positive-one-negative-per-step. Doesn't presuppose a single class-
+    conditional shape the way pulling toward one fraud centroid does (Run 82's ArcFace catch), so
+    it may handle the camo/obvious bimodality more gracefully without an explicit multi-prototype
+    structure -- the class is defined by whichever points happen to be in the batch, not by a
+    single running average."""
+    z = embeddings[batch_idx]  # already unit-normalized
+    sim = (z @ z.T) / temperature
+    sim = sim - sim.max(dim=1, keepdim=True).values.detach()  # numerical stability, doesn't change softmax
+    exp_sim = torch.exp(sim)
+    self_mask = torch.eye(len(batch_idx), device=z.device, dtype=torch.bool)
+    exp_sim = exp_sim.masked_fill(self_mask, 0.0)
+
+    label_eq = batch_labels.unsqueeze(0) == batch_labels.unsqueeze(1)
+    pos_mask = label_eq & ~self_mask
+
+    denom = exp_sim.sum(dim=1)
+    log_prob = sim - torch.log(denom.unsqueeze(1) + 1e-12)
+    pos_count = pos_mask.sum(dim=1).clamp(min=1)
+    loss_per_anchor = -(pos_mask * log_prob).sum(dim=1) / pos_count
+
+    valid = pos_mask.sum(dim=1) > 0  # anchors with zero same-label peers in this batch contribute nothing
+    return loss_per_anchor[valid].mean()
+
+
+def _align_uniform_loss(embeddings: torch.Tensor, fraud_idx: torch.Tensor, legit_idx: torch.Tensor,
+                         generator: torch.Generator, n_pairs: int, align_weight: float = 1.0,
+                         uniform_weight: float = 1.0, t: float = 2.0) -> torch.Tensor:
+    """Alignment + uniformity decomposition (Wang & Isola 2020, "Understanding Contrastive
+    Representation Learning through Alignment and Uniformity on the Hypersphere"). Alignment pulls
+    same-class pairs together (same spirit as triplet loss's positive term); uniformity spreads
+    ALL points evenly across the hypersphere instead of actively compressing toward a class
+    centroid. Directly motivated by Run 82's Center/Compression Loss finding: explicit compression
+    toward a centroid improved aggregate F1 but HURT hard-core recovery specifically (over-
+    tightened the already-thin camo sub-cluster, weight=0.5: fraud spread 0.126->0.068). Uniformity
+    only prevents wholesale collapse -- it doesn't actively shrink spread the way Center Loss's
+    variance penalty does, so it shouldn't repeat that trade-off."""
+    a1 = fraud_idx[torch.randint(0, len(fraud_idx), (n_pairs,), generator=generator)]
+    a2 = fraud_idx[torch.randint(0, len(fraud_idx), (n_pairs,), generator=generator)]
+    l1 = legit_idx[torch.randint(0, len(legit_idx), (n_pairs,), generator=generator)]
+    l2 = legit_idx[torch.randint(0, len(legit_idx), (n_pairs,), generator=generator)]
+    align = ((embeddings[a1] - embeddings[a2]).pow(2).sum(-1).mean()
+             + (embeddings[l1] - embeddings[l2]).pow(2).sum(-1).mean()) / 2
+
+    all_idx = torch.cat([fraud_idx, legit_idx])
+    sample = all_idx[torch.randperm(len(all_idx), generator=generator)[: min(len(all_idx), 2 * n_pairs)]]
+    z = embeddings[sample]
+    sq_dist = torch.cdist(z, z).pow(2)
+    uniform = torch.log(torch.exp(-t * sq_dist).mean() + 1e-12)
+
+    return align_weight * align + uniform_weight * uniform
+
+
 def run(config: dict, n_triplets_per_epoch: int = 2000, margin: float = 1.0,
-        compression_weight: float = 0.0, return_embeddings: bool = False, mining: str = "random") -> dict:
+        compression_weight: float = 0.0, return_embeddings: bool = False, mining: str = "random",
+        temperature: float = 0.1, align_weight: float = 1.0, uniform_weight: float = 1.0) -> dict:
     wandb_run = init_wandb(config, "metric_learning")
     set_seed(config["seed"])
     device = pick_device(config["train"]["device"])
@@ -324,8 +467,30 @@ def run(config: dict, n_triplets_per_epoch: int = 2000, margin: float = 1.0,
                 legit_centroid_live = embeddings[train_legit_idx.to(device)].mean(dim=0)
                 loss = _camo_weighted_loss(embeddings, anchor_idx.to(device), pos_idx.to(device), neg_idx.to(device),
                                             legit_centroid_live, margin)
+            elif mining == "semi_hard":
+                anchor_emb, pos_emb, neg_emb = _semi_hard_triplets(embeddings, train_fraud_idx.to(device), train_legit_idx.to(device),
+                                                                     n_triplets_per_epoch, generator)
+                loss = triplet_loss_fn(anchor_emb, pos_emb, neg_emb)
+            elif mining == "multi_prototype":
+                legit_centroid_live = embeddings[train_legit_idx.to(device)].mean(dim=0)
+                fraud_emb_live = embeddings[train_fraud_idx.to(device)]
+                _, _, sub_labels = _fraud_prototypes(fraud_emb_live, legit_centroid_live)
+                anchor_idx, pos_idx, neg_idx = _sample_multi_prototype_triplets(
+                    train_fraud_idx, train_legit_idx, sub_labels, n_triplets_per_epoch, generator)
+                anchor_emb, pos_emb, neg_emb = embeddings[anchor_idx.to(device)], embeddings[pos_idx.to(device)], embeddings[neg_idx.to(device)]
+                loss = triplet_loss_fn(anchor_emb, pos_emb, neg_emb)
+            elif mining == "supcon":
+                batch_fraud = train_fraud_idx[torch.randperm(len(train_fraud_idx), generator=generator)[:n_triplets_per_epoch]]
+                batch_legit = train_legit_idx[torch.randperm(len(train_legit_idx), generator=generator)[:n_triplets_per_epoch]]
+                batch_idx = torch.cat([batch_fraud, batch_legit]).to(device)
+                batch_labels = torch.cat([torch.ones(len(batch_fraud)), torch.zeros(len(batch_legit))]).to(device)
+                loss = _supcon_loss(embeddings, batch_idx, batch_labels, temperature)
+            elif mining == "align_uniform":
+                loss = _align_uniform_loss(embeddings, train_fraud_idx.to(device), train_legit_idx.to(device),
+                                            generator, n_triplets_per_epoch, align_weight, uniform_weight)
             else:
-                raise ValueError(f"Unknown mining: {mining!r} (expected 'random', 'hard', or 'camo_weighted')")
+                raise ValueError(f"Unknown mining: {mining!r} (expected 'random', 'hard', 'camo_weighted', "
+                                  f"'semi_hard', 'multi_prototype', 'supcon', or 'align_uniform')")
             if compression_weight > 0:
                 comp_loss = _compression_loss(embeddings, train_fraud_idx.to(device), train_legit_idx.to(device))
                 loss = loss + compression_weight * comp_loss
@@ -335,9 +500,14 @@ def run(config: dict, n_triplets_per_epoch: int = 2000, margin: float = 1.0,
             model.eval()
             with torch.no_grad():
                 val_embeddings = F.normalize(model.embed(data.x, data.val_edge_index), dim=-1)
-                fraud_centroid = val_embeddings[train_fraud_idx.to(device)].mean(dim=0)
                 legit_centroid = val_embeddings[train_legit_idx.to(device)].mean(dim=0)
-                val_scores = _centroid_scores(val_embeddings[data.val_mask], fraud_centroid, legit_centroid)
+                if mining == "multi_prototype":
+                    fraud_emb_val = val_embeddings[train_fraud_idx.to(device)]
+                    c0, c1, _ = _fraud_prototypes(fraud_emb_val, legit_centroid)
+                    val_scores = _multi_centroid_scores(val_embeddings[data.val_mask], c0, c1, legit_centroid)
+                else:
+                    fraud_centroid = val_embeddings[train_fraud_idx.to(device)].mean(dim=0)
+                    val_scores = _centroid_scores(val_embeddings[data.val_mask], fraud_centroid, legit_centroid)
                 val_y = data.y[data.val_mask].cpu().numpy()
                 val_metrics = compute_metrics(val_y, val_scores)
 
@@ -362,24 +532,35 @@ def run(config: dict, n_triplets_per_epoch: int = 2000, margin: float = 1.0,
         with torch.no_grad():
             test_edge_index = data.edge_index.to(device)
             test_embeddings = F.normalize(model.embed(data.x, test_edge_index), dim=-1)
-            fraud_centroid = test_embeddings[train_fraud_idx.to(device)].mean(dim=0)
             legit_centroid = test_embeddings[train_legit_idx.to(device)].mean(dim=0)
-            test_scores = _centroid_scores(test_embeddings[data.test_mask], fraud_centroid, legit_centroid)
-
-            # Raw per-centroid distances (not just the combined sigmoid score) -- lets a caller test
-            # legit-centroid-only scoring (2026-07-21 discussion: fraud may not cluster coherently
-            # enough for its own centroid to be a meaningful reference point, unlike legit) without
-            # retraining.
-            test_emb_masked = test_embeddings[data.test_mask]
-            dist_to_fraud = (test_emb_masked - fraud_centroid).pow(2).sum(-1).sqrt().cpu().numpy()
-            dist_to_legit = (test_emb_masked - legit_centroid).pow(2).sum(-1).sqrt().cpu().numpy()
-
-            # Within-class spread in the LEARNED embedding space -- is train fraud actually a
-            # coherent cluster (tight spread around its own centroid) or diffuse (large spread,
-            # meaning the fraud centroid itself is a weak/uninformative reference point)?
             train_fraud_emb = test_embeddings[train_fraud_idx.to(device)]
             train_legit_emb = test_embeddings[train_legit_idx.to(device)]
-            fraud_spread = (train_fraud_emb - fraud_centroid).pow(2).sum(-1).sqrt().cpu().numpy()
+            test_emb_masked = test_embeddings[data.test_mask]
+
+            if mining == "multi_prototype":
+                obvious_centroid, camo_centroid, _ = _fraud_prototypes(train_fraud_emb, legit_centroid)
+                test_scores = _multi_centroid_scores(test_emb_masked, obvious_centroid, camo_centroid, legit_centroid)
+                dist_to_obvious = (test_emb_masked - obvious_centroid).pow(2).sum(-1).sqrt()
+                dist_to_camo = (test_emb_masked - camo_centroid).pow(2).sum(-1).sqrt()
+                dist_to_fraud = torch.minimum(dist_to_obvious, dist_to_camo).cpu().numpy()
+                dist_to_legit = (test_emb_masked - legit_centroid).pow(2).sum(-1).sqrt().cpu().numpy()
+                fraud_dist_obvious = (train_fraud_emb - obvious_centroid).pow(2).sum(-1).sqrt()
+                fraud_dist_camo = (train_fraud_emb - camo_centroid).pow(2).sum(-1).sqrt()
+                fraud_spread = torch.minimum(fraud_dist_obvious, fraud_dist_camo).cpu().numpy()
+            else:
+                fraud_centroid = train_fraud_emb.mean(dim=0)
+                test_scores = _centroid_scores(test_emb_masked, fraud_centroid, legit_centroid)
+                # Raw per-centroid distances (not just the combined sigmoid score) -- lets a caller
+                # test legit-centroid-only scoring (2026-07-21 discussion: fraud may not cluster
+                # coherently enough for its own centroid to be a meaningful reference point, unlike
+                # legit) without retraining.
+                dist_to_fraud = (test_emb_masked - fraud_centroid).pow(2).sum(-1).sqrt().cpu().numpy()
+                dist_to_legit = (test_emb_masked - legit_centroid).pow(2).sum(-1).sqrt().cpu().numpy()
+                # Within-class spread in the LEARNED embedding space -- is train fraud actually a
+                # coherent cluster (tight spread around its own centroid) or diffuse (large spread,
+                # meaning the fraud centroid itself is a weak/uninformative reference point)?
+                fraud_spread = (train_fraud_emb - fraud_centroid).pow(2).sum(-1).sqrt().cpu().numpy()
+
             legit_spread = (train_legit_emb - legit_centroid).pow(2).sum(-1).sqrt().cpu().numpy()
             train_fraud_dist_to_legit = (train_fraud_emb - legit_centroid).pow(2).sum(-1).sqrt().cpu().numpy()
 

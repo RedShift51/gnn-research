@@ -1,0 +1,36 @@
+seed: 42
+
+data:
+  dataset: elliptic
+  raw_dir: data/raw/elliptic/elliptic_bitcoin_dataset
+  processed_path: data/processed/elliptic_graph.pt
+  train_end_step: 34
+  val_end_step: 41
+
+# Multi-prototype loss -- the principled response to Run 82's ArcFace catch: a single fraud
+# centroid forces one prototype onto a genuinely bimodal class (obvious ~60% vs. camouflaged ~40%
+# of step-42 fraud, Run 81), diluting the rare camouflaged archetype into an average dominated by
+# the obvious majority. Refits a 2-component GMM on fraud's distance-to-legit LIVE each epoch,
+# samples positives from the SAME sub-cluster as the anchor, and classifies by nearest-of-3
+# (obvious-fraud / camo-fraud / legit) instead of nearest-of-2.
+model:
+  name: graphsage_diff
+  hidden_dim: 128
+  num_layers: 2
+  dropout: 0.5
+
+train:
+  lr: 0.001
+  weight_decay: 0.00001
+  epochs: 1000
+  patience: 50
+  device: auto
+
+metric_learning:
+  enabled: true
+  margin: 1.0
+  mining: multi_prototype
+
+journal:
+  path: LAB_JOURNAL.md
+  run_name: elliptic_metric_learning_multi_prototype

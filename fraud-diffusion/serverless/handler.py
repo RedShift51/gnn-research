@@ -133,7 +133,10 @@ def handler(job):
                                           margin=mcfg.get("margin", 1.0),
                                           compression_weight=mcfg.get("compression_weight", 0.0),
                                           return_embeddings=mcfg.get("return_embeddings", False),
-                                          mining=mcfg.get("mining", "random"))
+                                          mining=mcfg.get("mining", "random"),
+                                          temperature=mcfg.get("temperature", 0.1),
+                                          align_weight=mcfg.get("align_weight", 1.0),
+                                          uniform_weight=mcfg.get("uniform_weight", 1.0))
         else:
             result = train_run(config, config_label, git_commit=commit_sha)
     except torch.cuda.OutOfMemoryError:

@@ -1,0 +1,38 @@
+seed: 42
+
+data:
+  dataset: elliptic
+  raw_dir: data/raw/elliptic/elliptic_bitcoin_dataset
+  processed_path: data/processed/elliptic_graph.pt
+  train_end_step: 34
+  val_end_step: 41
+
+# Alignment + uniformity decomposition (Wang & Isola 2020). Alignment pulls same-class pairs
+# together (same spirit as triplet loss's positive term); uniformity spreads ALL points evenly
+# across the hypersphere instead of actively compressing toward a class centroid. Directly
+# motivated by Run 82's Center/Compression Loss finding: explicit compression toward a centroid
+# improved aggregate F1 but HURT hard-core recovery specifically (over-tightened the already-thin
+# camo sub-cluster). Uniformity only prevents collapse, it doesn't actively shrink spread.
+model:
+  name: graphsage_diff
+  hidden_dim: 128
+  num_layers: 2
+  dropout: 0.5
+
+train:
+  lr: 0.001
+  weight_decay: 0.00001
+  epochs: 1000
+  patience: 50
+  device: auto
+
+metric_learning:
+  enabled: true
+  margin: 1.0
+  mining: align_uniform
+  align_weight: 1.0
+  uniform_weight: 1.0
+
+journal:
+  path: LAB_JOURNAL.md
+  run_name: elliptic_metric_learning_align_uniform
