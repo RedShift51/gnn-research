@@ -1,0 +1,51 @@
+seed: 42
+
+data:
+  dataset: ieee_cis
+  transaction_csv: data/raw/ieee_cis/train_transaction.csv
+  identity_csv: data/raw/ieee_cis/train_identity.csv
+  processed_path: data/processed/ieee_cis_graph_full_v3_fixed.pt
+  subsample_size: null
+  max_node_degree: 20
+  train_frac: 0.70
+  val_frac: 0.15
+  test_frac: 0.15
+  uid_features: true
+  uid_graph: true
+
+# Plain classification GraphSAGEDiff on the LEAK-FIXED richer graph (V-columns + out-of-fold UID
+# target encoding, ieee_cis_graph_full_v3_fixed.pt) -- the identical predecessor
+# (ieee_cis_graphsage_diff_full_minibatch.yaml) points at the pre-fix ieee_cis_graph_full_v2.pt, so
+# its cached test predictions aren't a valid paired comparison against the fixed graph. Dispatched
+# specifically to get test_scores on this exact graph, for the novel-client (uid unseen in train,
+# 48.7% of test rows) subset analysis: does topology add anything on the subset where RF's
+# identity-lookup features are uninformative (RF AUC drops 0.950->0.834 there)?
+model:
+  name: graphsage_diff
+  hidden_dim: 128
+  num_layers: 2
+  dropout: 0.5
+
+loss:
+  name: focal
+  alpha: 0.75
+  gamma: 2.0
+
+train:
+  lr: 0.001
+  weight_decay: 0.00001
+  epochs: 1000
+  patience: 50
+  device: auto
+  ema_decay: 0.98
+  ema_start_epoch: 30
+  mini_batch: true
+  batch_size: 1024
+  num_neighbors: [15, 10]
+
+debug:
+  return_test_predictions: true
+
+journal:
+  path: LAB_JOURNAL.md
+  run_name: ieee_cis_graphsage_diff_v3fixed_minibatch
