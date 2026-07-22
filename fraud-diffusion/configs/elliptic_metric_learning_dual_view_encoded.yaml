@@ -1,0 +1,34 @@
+seed: 42
+
+data:
+  dataset: elliptic
+  raw_dir: data/raw/elliptic/elliptic_bitcoin_dataset
+  processed_path: data/processed/elliptic_graph.pt
+  train_end_step: 34
+  val_end_step: 41
+
+# GraphSAGEDualView variant: adds a nonlinear feature encoder BEFORE the pairwise similarity is
+# computed, so the homophily/heterophily split is learned in a nonlinear feature space rather than
+# raw feature space -- quick, natural variant of Run 123's default (no encoder) to test alongside it.
+model:
+  name: graphsage_dual_view
+  hidden_dim: 128
+  num_layers: 2
+  dropout: 0.5
+  feature_encoder_hidden_dim: 64
+
+train:
+  lr: 0.001
+  weight_decay: 0.00001
+  epochs: 1000
+  patience: 50
+  device: auto
+
+metric_learning:
+  enabled: true
+  margin: 1.0
+  mining: camo_weighted
+
+journal:
+  path: LAB_JOURNAL.md
+  run_name: elliptic_metric_learning_dual_view_encoded
