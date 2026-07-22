@@ -28,9 +28,10 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import wandb
+from torch_geometric.loader import NeighborLoader
 
 from evaluation.metrics import compute_metrics
-from training.train_gnn import ROOT, build_model, init_wandb, load_config, pick_device, set_seed
+from training.train_gnn import ROOT, _graph_view, build_model, init_wandb, load_config, pick_device, set_seed
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +64,44 @@ def _hard_triplets(embeddings: torch.Tensor, fraud_idx: torch.Tensor, legit_idx:
     fraud_legit_dist = torch.cdist(fraud_emb, legit_emb)
     hardest_neg = fraud_legit_dist.argmin(dim=1)
     return fraud_emb, fraud_emb[hardest_pos], legit_emb[hardest_neg]
+
+
+def _embed_nodes(model, data_view, node_ids: torch.Tensor, num_neighbors: list, batch_size: int,
+                  device) -> torch.Tensor:
+    """Compute embeddings for an arbitrary set of global node ids via mini-batch NeighborLoader --
+    the metric-learning analogue of train_gnn.py's evaluate_batched, needed because IEEE-CIS's
+    ~590K-node/41M-edge graph makes a full-graph model.embed() call (what the non-mini_batch path
+    below does every epoch) OOM/time out the same way full-batch GraphSAGEDiff classification did
+    (see configs/ieee_cis_graphsage_diff_minibatch.yaml's comment).
+
+    Aligns results by batch.n_id, NOT by assuming the loader preserves input_nodes' order --
+    confirmed empirically (2026-07-22, IEEE-CIS hard-core investigation) that NeighborLoader can
+    locally swap two ADJACENT seed nodes' relative order (27 swapped pairs out of ~88.6K test
+    nodes), almost certainly from its internal node-dedup when one seed node is also sampled as a
+    neighbor of another seed node in the same batch. That's a tolerable ~0.06% corruption for a
+    final eval readout cross-referenced against an independent model, but silently wrong gradients
+    during training (mismatched anchor/positive/negative embeddings) would be far worse and much
+    harder to notice. n_id-based alignment is correct regardless of internal reordering.
+    Differentiable: torch.cat and advanced indexing both preserve autograd, so this is safe to call
+    inside a training step, not just under torch.no_grad()."""
+    loader = NeighborLoader(
+        data_view, num_neighbors=num_neighbors, batch_size=batch_size,
+        input_nodes=node_ids.cpu(), shuffle=False,
+    )
+    all_emb, all_ids = [], []
+    for batch in loader:
+        batch = batch.to(device)
+        emb = model.embed(batch.x, batch.edge_index)[: batch.batch_size]
+        all_emb.append(emb)
+        all_ids.append(batch.n_id[: batch.batch_size])
+    all_emb = torch.cat(all_emb, dim=0)
+    all_ids = torch.cat(all_ids, dim=0).cpu()
+
+    pos = torch.full((data_view.num_nodes,), -1, dtype=torch.long)
+    pos[all_ids] = torch.arange(len(all_ids))
+    order = pos[node_ids.cpu()]
+    assert (order >= 0).all(), "some requested node_ids never came back as a loader seed node"
+    return all_emb[order]
 
 
 def _camo_weighted_loss(embeddings: torch.Tensor, anchor_idx: torch.Tensor, pos_idx: torch.Tensor,
@@ -124,14 +163,16 @@ def run(config: dict, n_triplets_per_epoch: int = 2000, margin: float = 1.0,
     set_seed(config["seed"])
     device = pick_device(config["train"]["device"])
     data = torch.load(ROOT / config["data"]["processed_path"], weights_only=False)
+    mini_batch = config["train"].get("mini_batch", False)
 
-    data.x = data.x.to(device)
-    data.y = data.y.to(device)
-    data.train_mask = data.train_mask.to(device)
-    data.val_mask = data.val_mask.to(device)
-    data.test_mask = data.test_mask.to(device)
-    data.train_edge_index = data.train_edge_index.to(device)
-    data.val_edge_index = data.val_edge_index.to(device)
+    if not mini_batch:
+        data.x = data.x.to(device)
+        data.y = data.y.to(device)
+        data.train_mask = data.train_mask.to(device)
+        data.val_mask = data.val_mask.to(device)
+        data.test_mask = data.test_mask.to(device)
+        data.train_edge_index = data.train_edge_index.to(device)
+        data.val_edge_index = data.val_edge_index.to(device)
 
     model = build_model(config, in_dim=data.x.shape[1]).to(device)
     optimizer = torch.optim.Adam(
@@ -140,8 +181,10 @@ def run(config: dict, n_triplets_per_epoch: int = 2000, margin: float = 1.0,
     triplet_loss_fn = torch.nn.TripletMarginLoss(margin=margin, p=2)
     generator = torch.Generator(device="cpu").manual_seed(config["seed"])
 
-    train_fraud_idx = data.train_mask.nonzero(as_tuple=True)[0][data.y[data.train_mask] == 1].cpu()
-    train_legit_idx = data.train_mask.nonzero(as_tuple=True)[0][data.y[data.train_mask] == 0].cpu()
+    train_mask_cpu = data.train_mask if mini_batch else data.train_mask.cpu()
+    y_cpu = data.y if mini_batch else data.y.cpu()
+    train_fraud_idx = train_mask_cpu.nonzero(as_tuple=True)[0][y_cpu[train_mask_cpu] == 1]
+    train_legit_idx = train_mask_cpu.nonzero(as_tuple=True)[0][y_cpu[train_mask_cpu] == 0]
     logger.info(f"Train fraud={len(train_fraud_idx)}, train legit={len(train_legit_idx)}")
 
     best_val_auc = -1.0
@@ -150,83 +193,192 @@ def run(config: dict, n_triplets_per_epoch: int = 2000, margin: float = 1.0,
     epochs_since_improve = 0
     patience = config["train"]["patience"]
 
-    for epoch in range(1, config["train"]["epochs"] + 1):
-        model.train()
-        optimizer.zero_grad()
-        embeddings = model.embed(data.x, data.train_edge_index)
-        embeddings = F.normalize(embeddings, dim=-1)  # unit-norm, standard metric-learning practice
+    if mining == "hard" and mini_batch:
+        raise NotImplementedError(
+            "hard mining needs the full train fraud/legit population embedded every epoch -- "
+            "infeasible in mini-batch mode at IEEE-CIS's scale, and Run 79 already found it "
+            "destabilizes training badly even where it WAS feasible (Elliptic, full-batch)."
+        )
 
-        if mining == "hard":
-            anchor_emb, pos_emb, neg_emb = _hard_triplets(embeddings, train_fraud_idx.to(device), train_legit_idx.to(device))
-            loss = triplet_loss_fn(anchor_emb, pos_emb, neg_emb)
-        elif mining == "random":
-            anchor_idx, pos_idx, neg_idx = _sample_triplets(train_fraud_idx, train_legit_idx, n_triplets_per_epoch, generator)
-            anchor_emb, pos_emb, neg_emb = embeddings[anchor_idx.to(device)], embeddings[pos_idx.to(device)], embeddings[neg_idx.to(device)]
-            loss = triplet_loss_fn(anchor_emb, pos_emb, neg_emb)
-        elif mining == "camo_weighted":
-            anchor_idx, pos_idx, neg_idx = _sample_triplets(train_fraud_idx, train_legit_idx, n_triplets_per_epoch, generator)
-            legit_centroid_live = embeddings[train_legit_idx.to(device)].mean(dim=0)
-            loss = _camo_weighted_loss(embeddings, anchor_idx.to(device), pos_idx.to(device), neg_idx.to(device),
-                                        legit_centroid_live, margin)
-        else:
-            raise ValueError(f"Unknown mining: {mining!r} (expected 'random', 'hard', or 'camo_weighted')")
-        if compression_weight > 0:
-            comp_loss = _compression_loss(embeddings, train_fraud_idx.to(device), train_legit_idx.to(device))
-            loss = loss + compression_weight * comp_loss
-        loss.backward()
-        optimizer.step()
+    if mini_batch:
+        num_neighbors = config["train"]["num_neighbors"]
+        batch_size = config["train"]["batch_size"]
+        # Fixed once, not resampled per epoch -- IEEE-CIS's train-legit pool is ~400K, far too
+        # large to embed in full every epoch (that's the whole reason mini-batch mode exists).
+        # A single representative subsample serves as BOTH the camo_weighted live-centroid
+        # reference during training and the legit reference for eval-time nearest-centroid scoring.
+        legit_ref_size = min(len(train_legit_idx), config.get("metric_learning", {}).get("legit_ref_size", 3000))
+        legit_ref_idx = train_legit_idx[torch.randperm(len(train_legit_idx), generator=generator)[:legit_ref_size]]
+        logger.info(f"Mini-batch mode: legit reference pool = {legit_ref_size} (fixed for the whole run)")
 
+        train_view = _graph_view(data, data.train_edge_index)
+        val_view = _graph_view(data, data.val_edge_index)
+
+        for epoch in range(1, config["train"]["epochs"] + 1):
+            model.train()
+            optimizer.zero_grad()
+
+            anchor_idx, pos_idx, neg_idx = _sample_triplets(train_fraud_idx, train_legit_idx, n_triplets_per_epoch, generator)
+            needed = torch.unique(torch.cat(
+                [anchor_idx, pos_idx, neg_idx, legit_ref_idx] if mining == "camo_weighted" else [anchor_idx, pos_idx, neg_idx]
+            ))
+            embeddings_subset = F.normalize(_embed_nodes(model, train_view, needed, num_neighbors, batch_size, device), dim=-1)
+
+            pos_map = torch.full((data.num_nodes,), -1, dtype=torch.long)
+            pos_map[needed] = torch.arange(len(needed))
+            anchor_local = pos_map[anchor_idx].to(device)
+            pos_local = pos_map[pos_idx].to(device)
+            neg_local = pos_map[neg_idx].to(device)
+
+            if mining == "random":
+                loss = triplet_loss_fn(embeddings_subset[anchor_local], embeddings_subset[pos_local], embeddings_subset[neg_local])
+            elif mining == "camo_weighted":
+                legit_ref_local = pos_map[legit_ref_idx].to(device)
+                legit_centroid_live = embeddings_subset[legit_ref_local].mean(dim=0)
+                loss = _camo_weighted_loss(embeddings_subset, anchor_local, pos_local, neg_local, legit_centroid_live, margin)
+            else:
+                raise ValueError(f"Unknown mining: {mining!r} (expected 'random' or 'camo_weighted' in mini-batch mode)")
+            if compression_weight > 0:
+                fraud_local = torch.unique(torch.cat([anchor_local, pos_local]))
+                legit_local = torch.unique(torch.cat([neg_local, legit_ref_local]) if mining == "camo_weighted" else neg_local)
+                comp_loss = _compression_loss(embeddings_subset, fraud_local, legit_local)
+                loss = loss + compression_weight * comp_loss
+            loss.backward()
+            optimizer.step()
+
+            model.eval()
+            with torch.no_grad():
+                ref_needed = torch.unique(torch.cat([train_fraud_idx, legit_ref_idx]))
+                ref_emb = F.normalize(_embed_nodes(model, val_view, ref_needed, num_neighbors, batch_size, device), dim=-1)
+                ref_pos = torch.full((data.num_nodes,), -1, dtype=torch.long)
+                ref_pos[ref_needed] = torch.arange(len(ref_needed))
+                fraud_centroid = ref_emb[ref_pos[train_fraud_idx]].mean(dim=0)
+                legit_centroid = ref_emb[ref_pos[legit_ref_idx]].mean(dim=0)
+
+                val_idx = data.val_mask.nonzero(as_tuple=True)[0]
+                val_embeddings = F.normalize(_embed_nodes(model, val_view, val_idx, num_neighbors, batch_size, device), dim=-1)
+                val_scores = _centroid_scores(val_embeddings, fraud_centroid, legit_centroid)
+                val_y = data.y[val_idx].cpu().numpy()
+                val_metrics = compute_metrics(val_y, val_scores)
+
+            if val_metrics["auc_roc"] > best_val_auc:
+                best_val_auc = val_metrics["auc_roc"]
+                best_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
+                best_epoch = epoch
+                epochs_since_improve = 0
+            else:
+                epochs_since_improve += 1
+
+            if epoch % 5 == 0 or epoch == 1:
+                logger.info(f"epoch {epoch} triplet_loss={loss.item():.4f} val_auc={val_metrics['auc_roc']:.4f}")
+            wandb.log({"epoch": epoch, "triplet_loss": loss.item(), "val_auc": val_metrics["auc_roc"]}, step=epoch)
+
+            if epochs_since_improve >= patience:
+                logger.info(f"Early stopping at epoch {epoch} (best epoch {best_epoch})")
+                break
+
+        model.load_state_dict(best_state)
         model.eval()
         with torch.no_grad():
-            val_embeddings = F.normalize(model.embed(data.x, data.val_edge_index), dim=-1)
-            fraud_centroid = val_embeddings[train_fraud_idx.to(device)].mean(dim=0)
-            legit_centroid = val_embeddings[train_legit_idx.to(device)].mean(dim=0)
-            val_scores = _centroid_scores(val_embeddings[data.val_mask], fraud_centroid, legit_centroid)
-            val_y = data.y[data.val_mask].cpu().numpy()
-            val_metrics = compute_metrics(val_y, val_scores)
+            test_view = _graph_view(data, data.edge_index)
+            ref_needed = torch.unique(torch.cat([train_fraud_idx, legit_ref_idx]))
+            ref_emb = F.normalize(_embed_nodes(model, test_view, ref_needed, num_neighbors, batch_size, device), dim=-1)
+            ref_pos = torch.full((data.num_nodes,), -1, dtype=torch.long)
+            ref_pos[ref_needed] = torch.arange(len(ref_needed))
+            fraud_centroid = ref_emb[ref_pos[train_fraud_idx]].mean(dim=0)
+            legit_centroid = ref_emb[ref_pos[legit_ref_idx]].mean(dim=0)
+            train_fraud_emb = ref_emb[ref_pos[train_fraud_idx]]
+            train_legit_emb = ref_emb[ref_pos[legit_ref_idx]]
 
-        if val_metrics["auc_roc"] > best_val_auc:
-            best_val_auc = val_metrics["auc_roc"]
-            best_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
-            best_epoch = epoch
-            epochs_since_improve = 0
-        else:
-            epochs_since_improve += 1
+            test_idx = data.test_mask.nonzero(as_tuple=True)[0]
+            test_emb_masked = F.normalize(_embed_nodes(model, test_view, test_idx, num_neighbors, batch_size, device), dim=-1)
+            test_scores = _centroid_scores(test_emb_masked, fraud_centroid, legit_centroid)
+            dist_to_fraud = (test_emb_masked - fraud_centroid).pow(2).sum(-1).sqrt().cpu().numpy()
+            dist_to_legit = (test_emb_masked - legit_centroid).pow(2).sum(-1).sqrt().cpu().numpy()
+            fraud_spread = (train_fraud_emb - fraud_centroid).pow(2).sum(-1).sqrt().cpu().numpy()
+            legit_spread = (train_legit_emb - legit_centroid).pow(2).sum(-1).sqrt().cpu().numpy()
 
-        if epoch % 25 == 0 or epoch == 1:
-            logger.info(f"epoch {epoch} triplet_loss={loss.item():.4f} val_auc={val_metrics['auc_roc']:.4f}")
-        wandb.log({"epoch": epoch, "triplet_loss": loss.item(), "val_auc": val_metrics["auc_roc"]}, step=epoch)
+        test_y = data.y[test_idx].cpu().numpy()
 
-        if epochs_since_improve >= patience:
-            logger.info(f"Early stopping at epoch {epoch} (best epoch {best_epoch})")
-            break
+    else:
+        for epoch in range(1, config["train"]["epochs"] + 1):
+            model.train()
+            optimizer.zero_grad()
+            embeddings = model.embed(data.x, data.train_edge_index)
+            embeddings = F.normalize(embeddings, dim=-1)  # unit-norm, standard metric-learning practice
 
-    model.load_state_dict(best_state)
-    model.eval()
-    with torch.no_grad():
-        test_edge_index = data.edge_index.to(device)
-        test_embeddings = F.normalize(model.embed(data.x, test_edge_index), dim=-1)
-        fraud_centroid = test_embeddings[train_fraud_idx.to(device)].mean(dim=0)
-        legit_centroid = test_embeddings[train_legit_idx.to(device)].mean(dim=0)
-        test_scores = _centroid_scores(test_embeddings[data.test_mask], fraud_centroid, legit_centroid)
+            if mining == "hard":
+                anchor_emb, pos_emb, neg_emb = _hard_triplets(embeddings, train_fraud_idx.to(device), train_legit_idx.to(device))
+                loss = triplet_loss_fn(anchor_emb, pos_emb, neg_emb)
+            elif mining == "random":
+                anchor_idx, pos_idx, neg_idx = _sample_triplets(train_fraud_idx, train_legit_idx, n_triplets_per_epoch, generator)
+                anchor_emb, pos_emb, neg_emb = embeddings[anchor_idx.to(device)], embeddings[pos_idx.to(device)], embeddings[neg_idx.to(device)]
+                loss = triplet_loss_fn(anchor_emb, pos_emb, neg_emb)
+            elif mining == "camo_weighted":
+                anchor_idx, pos_idx, neg_idx = _sample_triplets(train_fraud_idx, train_legit_idx, n_triplets_per_epoch, generator)
+                legit_centroid_live = embeddings[train_legit_idx.to(device)].mean(dim=0)
+                loss = _camo_weighted_loss(embeddings, anchor_idx.to(device), pos_idx.to(device), neg_idx.to(device),
+                                            legit_centroid_live, margin)
+            else:
+                raise ValueError(f"Unknown mining: {mining!r} (expected 'random', 'hard', or 'camo_weighted')")
+            if compression_weight > 0:
+                comp_loss = _compression_loss(embeddings, train_fraud_idx.to(device), train_legit_idx.to(device))
+                loss = loss + compression_weight * comp_loss
+            loss.backward()
+            optimizer.step()
 
-        # Raw per-centroid distances (not just the combined sigmoid score) -- lets a caller test
-        # legit-centroid-only scoring (2026-07-21 discussion: fraud may not cluster coherently
-        # enough for its own centroid to be a meaningful reference point, unlike legit) without
-        # retraining.
-        test_emb_masked = test_embeddings[data.test_mask]
-        dist_to_fraud = (test_emb_masked - fraud_centroid).pow(2).sum(-1).sqrt().cpu().numpy()
-        dist_to_legit = (test_emb_masked - legit_centroid).pow(2).sum(-1).sqrt().cpu().numpy()
+            model.eval()
+            with torch.no_grad():
+                val_embeddings = F.normalize(model.embed(data.x, data.val_edge_index), dim=-1)
+                fraud_centroid = val_embeddings[train_fraud_idx.to(device)].mean(dim=0)
+                legit_centroid = val_embeddings[train_legit_idx.to(device)].mean(dim=0)
+                val_scores = _centroid_scores(val_embeddings[data.val_mask], fraud_centroid, legit_centroid)
+                val_y = data.y[data.val_mask].cpu().numpy()
+                val_metrics = compute_metrics(val_y, val_scores)
 
-        # Within-class spread in the LEARNED embedding space -- is train fraud actually a
-        # coherent cluster (tight spread around its own centroid) or diffuse (large spread,
-        # meaning the fraud centroid itself is a weak/uninformative reference point)?
-        train_fraud_emb = test_embeddings[train_fraud_idx.to(device)]
-        train_legit_emb = test_embeddings[train_legit_idx.to(device)]
-        fraud_spread = (train_fraud_emb - fraud_centroid).pow(2).sum(-1).sqrt().cpu().numpy()
-        legit_spread = (train_legit_emb - legit_centroid).pow(2).sum(-1).sqrt().cpu().numpy()
+            if val_metrics["auc_roc"] > best_val_auc:
+                best_val_auc = val_metrics["auc_roc"]
+                best_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
+                best_epoch = epoch
+                epochs_since_improve = 0
+            else:
+                epochs_since_improve += 1
 
-    test_y = data.y[data.test_mask].cpu().numpy()
+            if epoch % 25 == 0 or epoch == 1:
+                logger.info(f"epoch {epoch} triplet_loss={loss.item():.4f} val_auc={val_metrics['auc_roc']:.4f}")
+            wandb.log({"epoch": epoch, "triplet_loss": loss.item(), "val_auc": val_metrics["auc_roc"]}, step=epoch)
+
+            if epochs_since_improve >= patience:
+                logger.info(f"Early stopping at epoch {epoch} (best epoch {best_epoch})")
+                break
+
+        model.load_state_dict(best_state)
+        model.eval()
+        with torch.no_grad():
+            test_edge_index = data.edge_index.to(device)
+            test_embeddings = F.normalize(model.embed(data.x, test_edge_index), dim=-1)
+            fraud_centroid = test_embeddings[train_fraud_idx.to(device)].mean(dim=0)
+            legit_centroid = test_embeddings[train_legit_idx.to(device)].mean(dim=0)
+            test_scores = _centroid_scores(test_embeddings[data.test_mask], fraud_centroid, legit_centroid)
+
+            # Raw per-centroid distances (not just the combined sigmoid score) -- lets a caller test
+            # legit-centroid-only scoring (2026-07-21 discussion: fraud may not cluster coherently
+            # enough for its own centroid to be a meaningful reference point, unlike legit) without
+            # retraining.
+            test_emb_masked = test_embeddings[data.test_mask]
+            dist_to_fraud = (test_emb_masked - fraud_centroid).pow(2).sum(-1).sqrt().cpu().numpy()
+            dist_to_legit = (test_emb_masked - legit_centroid).pow(2).sum(-1).sqrt().cpu().numpy()
+
+            # Within-class spread in the LEARNED embedding space -- is train fraud actually a
+            # coherent cluster (tight spread around its own centroid) or diffuse (large spread,
+            # meaning the fraud centroid itself is a weak/uninformative reference point)?
+            train_fraud_emb = test_embeddings[train_fraud_idx.to(device)]
+            train_legit_emb = test_embeddings[train_legit_idx.to(device)]
+            fraud_spread = (train_fraud_emb - fraud_centroid).pow(2).sum(-1).sqrt().cpu().numpy()
+            legit_spread = (train_legit_emb - legit_centroid).pow(2).sum(-1).sqrt().cpu().numpy()
+
+        test_y = data.y[data.test_mask].cpu().numpy()
+
     test_metrics = compute_metrics(test_y, test_scores)
 
     logger.info(f"Metric learning (best_epoch={best_epoch}): Test={test_metrics}")
