@@ -86,13 +86,16 @@ def build_node_features(df: pd.DataFrame, train_mask: np.ndarray) -> np.ndarray:
     return np.concatenate([numeric, categorical], axis=1).astype(np.float32)
 
 
-def build_edges(df: pd.DataFrame, max_node_degree: int) -> np.ndarray:
-    """Connect transactions sharing an entity key (card1 or addr1) to their temporal neighbors on
-    that key -- same construction as data/paysim_preprocess.py's build_edges, adapted to IEEE-CIS's
-    entity columns. NaN entity values are skipped (a shared NaN does NOT mean a shared entity)."""
+def build_edges(df: pd.DataFrame, max_node_degree: int, entity_cols: list = None) -> np.ndarray:
+    """Connect transactions sharing an entity key (card1 or addr1, or the more precise
+    reconstructed "uid" -- see build_uid -- when run_from_config adds it to entity_cols) to their
+    temporal neighbors on that key -- same construction as data/paysim_preprocess.py's build_edges,
+    adapted to IEEE-CIS's entity columns. NaN entity values are skipped (a shared NaN does NOT mean
+    a shared entity)."""
     edges = set()
+    entity_cols = ENTITY_EDGE_COLS if entity_cols is None else entity_cols
 
-    for entity_col in ENTITY_EDGE_COLS:
+    for entity_col in entity_cols:
         for key, group in df.groupby(entity_col).groups.items():
             if pd.isna(key):
                 continue
@@ -133,7 +136,21 @@ def build_entity_sequences(df: pd.DataFrame, entity_col: str, seq_len: int) -> n
     return seq_idx
 
 
-def build_uid_features(df: pd.DataFrame, train_mask: np.ndarray) -> tuple:
+def build_uid(df: pd.DataFrame) -> pd.Series:
+    """Client (UID) reconstruction, shared by build_uid_features (node aggregate/target-encoded
+    features) AND build_edges/build_entity_sequences (graph structure, via run_from_config storing
+    this into df["uid"] and adding "uid" to the entity-edge columns) -- so the GNN's own neighbor
+    aggregation benefits from the SAME more-precise client-identity proxy the node features do,
+    not just a cruder card1/addr1-only signal. See build_uid_features for the full rationale."""
+    day = (df["TransactionDT"] // 86400).astype(int)
+    d1_anchor = day - df["D1"].fillna(0).astype(int)
+    return (
+        df["card1"].astype(str) + "_" + df["addr1"].astype(str) + "_"
+        + d1_anchor.astype(str) + "_" + df["P_emaildomain"].astype(str)
+    )
+
+
+def build_uid_features(df: pd.DataFrame, train_mask: np.ndarray, uid: pd.Series = None) -> tuple:
     """Client (UID) reconstruction + causal aggregate features + target encoding -- the actual
     winning insight from this competition (Yakovlev/Deotte 1st place: local val AUC 0.9245 ->
     0.9377 from UIDs ALONE, more than the raw V-columns gave; Bryansky/CPMP/Giba 2nd place, same
@@ -150,15 +167,12 @@ def build_uid_features(df: pd.DataFrame, train_mask: np.ndarray) -> tuple:
     in this codebase. Only ever looks at STRICTLY EARLIER same-uid rows in the globally
     time-sorted df, same convention as build_entity_sequences.
 
-    Returns (features [n, 5] float32, uid Series) -- uid is returned too since build_edges/
-    build_entity_sequences could be pointed at it as an additional entity column later."""
+    Returns (features [n, 5] float32, uid Series). Accepts a precomputed `uid` (e.g. already
+    stored in df["uid"] by run_from_config for graph construction) to avoid recomputing it twice
+    when both uid_features and uid_graph are enabled together."""
     n = len(df)
-    day = (df["TransactionDT"] // 86400).astype(int)
-    d1_anchor = day - df["D1"].fillna(0).astype(int)
-    uid = (
-        df["card1"].astype(str) + "_" + df["addr1"].astype(str) + "_"
-        + d1_anchor.astype(str) + "_" + df["P_emaildomain"].astype(str)
-    )
+    if uid is None:
+        uid = build_uid(df)
 
     prior_count = np.zeros(n, dtype=np.float32)
     time_since_prev = np.full(n, -1.0, dtype=np.float32)  # -1 sentinel: no prior same-uid transaction
@@ -254,9 +268,14 @@ def run_from_config(config: dict) -> Path:
     logger.info(f"Fraud per split: train={df['isFraud'][train_mask].sum()} "
                 f"val={df['isFraud'][val_mask].sum()} test={df['isFraud'][test_mask].sum()}")
 
+    uid = None
+    if data_cfg.get("uid_features", False) or data_cfg.get("uid_graph", False):
+        uid = build_uid(df)
+        df["uid"] = uid  # lets build_edges/build_entity_sequences reference it like any other column
+
     features = build_node_features(df, train_mask)
     if data_cfg.get("uid_features", False):
-        uid_feats, _ = build_uid_features(df, train_mask)
+        uid_feats, _ = build_uid_features(df, train_mask, uid=uid)
         logger.info(f"Built UID features: {uid_feats.shape[1]} columns "
                     f"(prior_count, time_since_prev, prev_amt_mean, prev_amt_std, target_enc)")
         features = np.concatenate([features, uid_feats], axis=1)
@@ -264,8 +283,13 @@ def run_from_config(config: dict) -> Path:
     scaler.fit(features[train_mask])
     features = scaler.transform(features).astype(np.float32)
 
-    edge_index = build_edges(df, data_cfg["max_node_degree"])
-    logger.info(f"Built {edge_index.shape[1]} directed edges over {n} nodes")
+    # Adds "uid" as a THIRD entity-edge column alongside card1/addr1 (not a replacement) -- more,
+    # higher-precision edges rather than fewer, cruder ones. The GNN's own neighbor aggregation
+    # then benefits from the same more-precise client-identity proxy the RF node features already
+    # do (Run 94), instead of only card1/addr1 separately.
+    entity_edge_cols = ENTITY_EDGE_COLS + ["uid"] if data_cfg.get("uid_graph", False) else ENTITY_EDGE_COLS
+    edge_index = build_edges(df, data_cfg["max_node_degree"], entity_cols=entity_edge_cols)
+    logger.info(f"Built {edge_index.shape[1]} directed edges over {n} nodes (entity_cols={entity_edge_cols})")
 
     seq_len = data_cfg.get("entity_seq_len")
     seq_indices = None
