@@ -1,0 +1,47 @@
+seed: 42
+
+data:
+  dataset: ieee_cis
+  transaction_csv: data/raw/ieee_cis/train_transaction.csv
+  identity_csv: data/raw/ieee_cis/train_identity.csv
+  processed_path: data/processed/ieee_cis_graph.pt
+  subsample_size: null
+  max_node_degree: 20
+  train_frac: 0.70
+  val_frac: 0.15
+  test_frac: 0.15
+
+# Camo-weighted mining on IEEE-CIS -- never actually tried here despite being the ONE lever that
+# reliably worked on Elliptic (12-27% hard-core recovery, 5-seed confirmed, zero cost). Run 88's
+# IEEE-CIS bimodality check only ever used plain random-triplet mining; this is the direct
+# transplant of the thing that actually worked. Honest caveat going in: IEEE-CIS's own bimodality
+# check (Run 88) was weaker and more ambiguous than Elliptic's (76/24% split, but the majority
+# component's std was suspiciously tight, BIC still improving at 3 components, no independent
+# behavioral confirmation) -- so this is a real test of whether camo-weighted's premise
+# (a pre-existing camouflaged sub-archetype worth up-weighting) transfers, not an assumed win.
+model:
+  name: graphsage_diff
+  hidden_dim: 128
+  num_layers: 2
+  dropout: 0.5
+
+train:
+  lr: 0.001
+  weight_decay: 0.00001
+  epochs: 1000
+  patience: 50
+  device: auto
+  mini_batch: true
+  batch_size: 1024
+  num_neighbors: [15, 10]
+
+metric_learning:
+  enabled: true
+  margin: 1.0
+  mining: camo_weighted
+  return_embeddings: false
+  legit_ref_size: 3000
+
+journal:
+  path: LAB_JOURNAL.md
+  run_name: ieee_cis_metric_learning_camo_weighted
