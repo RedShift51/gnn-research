@@ -38,7 +38,7 @@ metric_learning:
   enabled: true
   margin: 1.0
   mining: random
-  return_embeddings: true
+  return_embeddings: false
   legit_ref_size: 3000
 
 journal:
