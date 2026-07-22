@@ -1,0 +1,57 @@
+seed: 42
+
+data:
+  dataset: ieee_cis
+  transaction_csv: data/raw/ieee_cis/train_transaction.csv
+  identity_csv: data/raw/ieee_cis/train_identity.csv
+  processed_path: data/processed/ieee_cis_graph_full_v3_fixed.pt
+  subsample_size: null
+  max_node_degree: 20
+  train_frac: 0.70
+  val_frac: 0.15
+  test_frac: 0.15
+  uid_features: true
+  uid_graph: true
+
+# GNN-embeddings + RF hybrid, on the richer (V-cols + leak-fixed UID) feature/graph set (Run 94-96)
+# -- flagged as a "next" step back in Run 83 (IEEE-CIS GNN+RF hybrid at full scale, never
+# dispatched -- earlier attempts predate the mini-batch fix and failed on the same full-batch OOM
+# every other full-batch IEEE-CIS attempt hit). evaluation/gnn_rf_hybrid.py's mini-batch path
+# added 2026-07-22 specifically for this run, mirroring train_gnn.py's/metric_learning.py's own
+# mini-batch conventions. Motivation: this is the single best-performing lever in the whole
+# project's history (RF models nonlinear feature interactions a linear GNN classifier head can't,
+# LAB_JOURNAL.md Run 52) -- Run 95 found plain GraphSAGEDiff classification REGRESSES on the richer
+# features while RF alone improves; this tests whether GNN embeddings, fed to RF instead of a
+# linear head, avoid that regression and add anything beyond RF-on-raw-features-alone (Run 96,
+# F1=0.7687, AUC=0.9086, hard-core AUC=0.8561).
+model:
+  name: graphsage_diff
+  hidden_dim: 128
+  num_layers: 2
+  dropout: 0.5
+
+loss:
+  name: focal
+  alpha: 0.75
+  gamma: 2.0
+
+train:
+  lr: 0.001
+  weight_decay: 0.00001
+  epochs: 1000
+  patience: 50
+  device: auto
+  mini_batch: true
+  batch_size: 1024
+  num_neighbors: [15, 10]
+
+hybrid:
+  enabled: true
+  n_estimators: 300
+
+debug:
+  return_test_predictions: true
+
+journal:
+  path: LAB_JOURNAL.md
+  run_name: ieee_cis_gnn_rf_hybrid_full
