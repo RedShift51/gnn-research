@@ -158,23 +158,18 @@ def _compression_loss(embeddings: torch.Tensor, fraud_idx: torch.Tensor, legit_i
     return fraud_var + legit_var
 
 
-def _semi_hard_triplets(embeddings: torch.Tensor, fraud_idx: torch.Tensor, legit_idx: torch.Tensor,
-                         n_triplets: int, generator: torch.Generator) -> tuple:
-    """Semi-hard negative mining (Schroff et al. 2015, FaceNet). For each (anchor, positive) fraud
-    pair, picks the CLOSEST legit negative that's still farther than the positive
-    (d(a,n) > d(a,p)) -- violates the margin only slightly, giving a small but informative
+def _semi_hard_negatives(anchor_emb: torch.Tensor, pos_emb: torch.Tensor, legit_emb: torch.Tensor) -> torch.Tensor:
+    """Semi-hard negative SELECTION (Schroff et al. 2015, FaceNet), pure tensor op -- for each
+    (anchor, positive) pair, picks the CLOSEST legit candidate that's still farther than the
+    positive (d(a,n) > d(a,p)): violates the margin only slightly, giving a small but informative
     gradient. This is the literature-standard middle ground between random sampling (_sample_
     triplets: too easy, most triplets already satisfy the margin, weak gradient) and pure
     batch-hard mining (_hard_triplets, Run 79: destabilized training badly, F1 crashed to 0.325,
     from the non-stationary "hardest changes every epoch" dynamic) -- a gap this codebase never
     actually tested despite having both extremes. Falls back to the single hardest (closest)
-    negative when no legit point is farther than the positive (rare, but must be handled)."""
-    anchor_idx = fraud_idx[torch.randint(0, len(fraud_idx), (n_triplets,), generator=generator)]
-    pos_idx = fraud_idx[torch.randint(0, len(fraud_idx), (n_triplets,), generator=generator)]
-    anchor_emb = embeddings[anchor_idx]
-    pos_emb = embeddings[pos_idx]
-    legit_emb = embeddings[legit_idx]
-
+    candidate when none is farther than the positive (rare, but must be handled). Separated from
+    sampling so mini-batch mode can reuse it against a fixed legit reference pool instead of the
+    full (there, infeasible-to-embed-every-epoch) train-legit population _semi_hard_triplets uses."""
     d_pos = (anchor_emb - pos_emb).pow(2).sum(-1).sqrt()
     d_an = torch.cdist(anchor_emb, legit_emb)
 
@@ -185,7 +180,20 @@ def _semi_hard_triplets(embeddings: torch.Tensor, fraud_idx: torch.Tensor, legit
     if no_semi_hard.any():
         hardest_local = d_an.argmin(dim=1)
         semi_hard_local = torch.where(no_semi_hard, hardest_local, semi_hard_local)
-    neg_emb = legit_emb[semi_hard_local]
+    return legit_emb[semi_hard_local]
+
+
+def _semi_hard_triplets(embeddings: torch.Tensor, fraud_idx: torch.Tensor, legit_idx: torch.Tensor,
+                         n_triplets: int, generator: torch.Generator) -> tuple:
+    """Full-batch entry point: samples random anchor/positive fraud pairs, then applies
+    _semi_hard_negatives against the FULL legit population (feasible here since embeddings covers
+    every node already)."""
+    anchor_idx = fraud_idx[torch.randint(0, len(fraud_idx), (n_triplets,), generator=generator)]
+    pos_idx = fraud_idx[torch.randint(0, len(fraud_idx), (n_triplets,), generator=generator)]
+    anchor_emb = embeddings[anchor_idx]
+    pos_emb = embeddings[pos_idx]
+    legit_emb = embeddings[legit_idx]
+    neg_emb = _semi_hard_negatives(anchor_emb, pos_emb, legit_emb)
     return anchor_emb, pos_emb, neg_emb
 
 
@@ -362,8 +370,11 @@ def run(config: dict, n_triplets_per_epoch: int = 2000, margin: float = 1.0,
             optimizer.zero_grad()
 
             anchor_idx, pos_idx, neg_idx = _sample_triplets(train_fraud_idx, train_legit_idx, n_triplets_per_epoch, generator)
+            uses_legit_ref = mining in ("camo_weighted", "semi_hard")
             needed = torch.unique(torch.cat(
-                [anchor_idx, pos_idx, neg_idx, legit_ref_idx] if mining == "camo_weighted" else [anchor_idx, pos_idx, neg_idx]
+                [anchor_idx, pos_idx, legit_ref_idx] if mining == "semi_hard"
+                else [anchor_idx, pos_idx, neg_idx, legit_ref_idx] if mining == "camo_weighted"
+                else [anchor_idx, pos_idx, neg_idx]
             ))
             embeddings_subset = F.normalize(_embed_nodes(model, train_view, needed, num_neighbors, batch_size, device), dim=-1)
 
@@ -371,19 +382,28 @@ def run(config: dict, n_triplets_per_epoch: int = 2000, margin: float = 1.0,
             pos_map[needed] = torch.arange(len(needed))
             anchor_local = pos_map[anchor_idx].to(device)
             pos_local = pos_map[pos_idx].to(device)
-            neg_local = pos_map[neg_idx].to(device)
+            legit_ref_local = pos_map[legit_ref_idx].to(device) if uses_legit_ref else None
+            neg_local = pos_map[neg_idx].to(device) if mining != "semi_hard" else None
 
             if mining == "random":
                 loss = triplet_loss_fn(embeddings_subset[anchor_local], embeddings_subset[pos_local], embeddings_subset[neg_local])
             elif mining == "camo_weighted":
-                legit_ref_local = pos_map[legit_ref_idx].to(device)
                 legit_centroid_live = embeddings_subset[legit_ref_local].mean(dim=0)
                 loss = _camo_weighted_loss(embeddings_subset, anchor_local, pos_local, neg_local, legit_centroid_live, margin)
+            elif mining == "semi_hard":
+                # Candidate negative pool is the fixed legit_ref subsample, not the full ~400K-node
+                # train-legit population _semi_hard_triplets uses in full-batch mode -- same
+                # infeasible-to-embed-every-epoch reason camo_weighted's live centroid uses it too.
+                anchor_emb = embeddings_subset[anchor_local]
+                pos_emb = embeddings_subset[pos_local]
+                neg_emb = _semi_hard_negatives(anchor_emb, pos_emb, embeddings_subset[legit_ref_local])
+                loss = triplet_loss_fn(anchor_emb, pos_emb, neg_emb)
             else:
-                raise ValueError(f"Unknown mining: {mining!r} (expected 'random' or 'camo_weighted' in mini-batch mode)")
+                raise ValueError(f"Unknown mining: {mining!r} (expected 'random', 'camo_weighted', or 'semi_hard' in mini-batch mode)")
             if compression_weight > 0:
                 fraud_local = torch.unique(torch.cat([anchor_local, pos_local]))
-                legit_local = torch.unique(torch.cat([neg_local, legit_ref_local]) if mining == "camo_weighted" else neg_local)
+                legit_local = torch.unique(torch.cat([neg_local, legit_ref_local]) if mining == "camo_weighted"
+                                            else legit_ref_local if mining == "semi_hard" else neg_local)
                 comp_loss = _compression_loss(embeddings_subset, fraud_local, legit_local)
                 loss = loss + compression_weight * comp_loss
             loss.backward()

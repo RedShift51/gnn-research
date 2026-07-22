@@ -1,0 +1,44 @@
+seed: 42
+
+data:
+  dataset: ieee_cis
+  transaction_csv: data/raw/ieee_cis/train_transaction.csv
+  identity_csv: data/raw/ieee_cis/train_identity.csv
+  processed_path: data/processed/ieee_cis_graph.pt
+  subsample_size: null
+  max_node_degree: 20
+  train_frac: 0.70
+  val_frac: 0.15
+  test_frac: 0.15
+
+# Semi-hard mining on IEEE-CIS -- newly wired into mini-batch mode (2026-07-22) specifically for
+# this test. On Elliptic, semi-hard was the single-run BEST hard-core recovery (14.6%, vs
+# camo-weighted's 13.1%), though not yet multi-seed confirmed there either. Candidate negative
+# pool is the fixed legit_ref subsample (same one camo_weighted's live centroid uses), not the
+# full ~400K-node train-legit population -- infeasible to embed every epoch at this scale.
+model:
+  name: graphsage_diff
+  hidden_dim: 128
+  num_layers: 2
+  dropout: 0.5
+
+train:
+  lr: 0.001
+  weight_decay: 0.00001
+  epochs: 1000
+  patience: 50
+  device: auto
+  mini_batch: true
+  batch_size: 1024
+  num_neighbors: [15, 10]
+
+metric_learning:
+  enabled: true
+  margin: 1.0
+  mining: semi_hard
+  return_embeddings: false
+  legit_ref_size: 3000
+
+journal:
+  path: LAB_JOURNAL.md
+  run_name: ieee_cis_metric_learning_semi_hard
