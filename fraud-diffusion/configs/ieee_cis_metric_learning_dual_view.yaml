@@ -1,0 +1,45 @@
+seed: 42
+
+data:
+  dataset: ieee_cis
+  transaction_csv: data/raw/ieee_cis/train_transaction.csv
+  identity_csv: data/raw/ieee_cis/train_identity.csv
+  processed_path: data/processed/ieee_cis_graph_full_v3_fixed.pt
+  subsample_size: null
+  max_node_degree: 20
+  train_frac: 0.70
+  val_frac: 0.15
+  test_frac: 0.15
+  uid_features: true
+  uid_graph: true
+
+# GraphSAGEDualView (HOT-GNN-inspired decoupled homophily/heterophily aggregation, see
+# models/gnn/graphsage.py) + camo-weighted metric learning, on IEEE-CIS's leak-fixed richer graph.
+# Direct transplant of the same architecture/objective combination tested on Elliptic (Run 123),
+# compared against ieee_cis_metric_learning_camo_weighted_v3fixed.yaml as the matched baseline.
+model:
+  name: graphsage_dual_view
+  hidden_dim: 128
+  num_layers: 2
+  dropout: 0.5
+
+train:
+  lr: 0.001
+  weight_decay: 0.00001
+  epochs: 1000
+  patience: 50
+  device: auto
+  mini_batch: true
+  batch_size: 1024
+  num_neighbors: [15, 10]
+
+metric_learning:
+  enabled: true
+  margin: 1.0
+  mining: camo_weighted
+  return_embeddings: false
+  legit_ref_size: 3000
+
+journal:
+  path: LAB_JOURNAL.md
+  run_name: ieee_cis_metric_learning_dual_view
