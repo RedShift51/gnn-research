@@ -150,7 +150,8 @@ def build_uid(df: pd.DataFrame) -> pd.Series:
     )
 
 
-def build_uid_features(df: pd.DataFrame, train_mask: np.ndarray, uid: pd.Series = None) -> tuple:
+def build_uid_features(df: pd.DataFrame, train_mask: np.ndarray, uid: pd.Series = None,
+                        seed: int = 42, n_folds: int = 5) -> tuple:
     """Client (UID) reconstruction + causal aggregate features + target encoding -- the actual
     winning insight from this competition (Yakovlev/Deotte 1st place: local val AUC 0.9245 ->
     0.9377 from UIDs ALONE, more than the raw V-columns gave; Bryansky/CPMP/Giba 2nd place, same
@@ -193,17 +194,38 @@ def build_uid_features(df: pd.DataFrame, train_mask: np.ndarray, uid: pd.Series 
                 if pos > 1:
                     prev_amt_std[i] = amt[prev_idxs].std()
 
-    # Regularized target encoding (CPMP's recipe): TRAIN-only fraud rate per uid, shrunk toward the
-    # global TRAIN mean by frequency -- rare/unseen uids fall back toward the overall rate instead
-    # of a noisy small/zero-sample estimate. Never touches val/test labels.
-    train_y = df["isFraud"][train_mask]
-    train_uid = uid[train_mask]
-    global_mean = train_y.mean()
+    # Regularized target encoding (CPMP's recipe): fraud rate per uid, shrunk toward the global
+    # TRAIN mean by frequency -- rare/unseen uids fall back toward the overall rate instead of a
+    # noisy small/zero-sample estimate.
+    #
+    # OUT-OF-FOLD for train rows (2026-07-22 catch, found while sanity-checking a DIFFERENT feature
+    # for leakage): the un-folded version put each train row's OWN label into the group average its
+    # own uid maps to. For singleton uid groups (25.7% of train rows), that's a real, if smoothing-
+    # diluted, self-reference -- (1*own_label + 10*global_mean)/11, roughly 9% weight on the row's
+    # own answer. K-fold removes this for train rows specifically: each row's encoding comes only
+    # from OTHER folds' statistics, matching standard target-encoding practice. Val/test rows are
+    # unaffected either way and use the single full-train-based encoding below -- they never
+    # contribute to any fold's aggregation, so there was never a leak for them.
+    global_mean = df["isFraud"][train_mask].mean()
     smoothing = 10.0
-    grp = train_y.groupby(train_uid)
-    uid_stats = grp.agg(["mean", "count"])
-    smoothed = (uid_stats["count"] * uid_stats["mean"] + smoothing * global_mean) / (uid_stats["count"] + smoothing)
-    target_enc = uid.map(smoothed).fillna(global_mean).astype(np.float32).to_numpy()
+    target_enc = np.full(n, np.nan, dtype=np.float64)
+
+    train_idx = np.where(train_mask)[0]
+    rng = np.random.default_rng(seed)
+    fold_assignment = rng.integers(0, n_folds, size=len(train_idx))
+    for fold in range(n_folds):
+        held_out = train_idx[fold_assignment == fold]
+        fit_idx = train_idx[fold_assignment != fold]
+        fit_stats = df["isFraud"].iloc[fit_idx].groupby(uid.iloc[fit_idx]).agg(["mean", "count"])
+        fit_smoothed = (fit_stats["count"] * fit_stats["mean"] + smoothing * global_mean) / (fit_stats["count"] + smoothing)
+        target_enc[held_out] = uid.iloc[held_out].map(fit_smoothed).fillna(global_mean).to_numpy()
+
+    full_stats = df["isFraud"][train_mask].groupby(uid[train_mask]).agg(["mean", "count"])
+    full_smoothed = (full_stats["count"] * full_stats["mean"] + smoothing * global_mean) / (full_stats["count"] + smoothing)
+    non_train_idx = np.where(~train_mask)[0]
+    target_enc[non_train_idx] = uid.iloc[non_train_idx].map(full_smoothed).fillna(global_mean).to_numpy()
+
+    target_enc = target_enc.astype(np.float32)
 
     features = np.stack([prior_count, time_since_prev, prev_amt_mean, prev_amt_std, target_enc], axis=1)
     return features.astype(np.float32), uid
@@ -275,7 +297,7 @@ def run_from_config(config: dict) -> Path:
 
     features = build_node_features(df, train_mask)
     if data_cfg.get("uid_features", False):
-        uid_feats, _ = build_uid_features(df, train_mask, uid=uid)
+        uid_feats, _ = build_uid_features(df, train_mask, uid=uid, seed=config["seed"])
         logger.info(f"Built UID features: {uid_feats.shape[1]} columns "
                     f"(prior_count, time_since_prev, prev_amt_mean, prev_amt_std, target_enc)")
         features = np.concatenate([features, uid_feats], axis=1)
