@@ -297,6 +297,11 @@ def run(config: dict, n_triplets_per_epoch: int = 2000, margin: float = 1.0,
             dist_to_legit = (test_emb_masked - legit_centroid).pow(2).sum(-1).sqrt().cpu().numpy()
             fraud_spread = (train_fraud_emb - fraud_centroid).pow(2).sum(-1).sqrt().cpu().numpy()
             legit_spread = (train_legit_emb - legit_centroid).pow(2).sum(-1).sqrt().cpu().numpy()
+            # dist-to-legit-centroid for TRAIN fraud, not just test -- needed for a time-independent
+            # bimodality check (2026-07-22: does a camo/obvious split exist in fraud generally, not
+            # tied to any temporal break). A scalar-per-node array, so far cheaper to return than
+            # raw embeddings would be -- no need to fight the payload-size limit for this.
+            train_fraud_dist_to_legit = (train_fraud_emb - legit_centroid).pow(2).sum(-1).sqrt().cpu().numpy()
 
         test_y = data.y[test_idx].cpu().numpy()
 
@@ -376,6 +381,7 @@ def run(config: dict, n_triplets_per_epoch: int = 2000, margin: float = 1.0,
             train_legit_emb = test_embeddings[train_legit_idx.to(device)]
             fraud_spread = (train_fraud_emb - fraud_centroid).pow(2).sum(-1).sqrt().cpu().numpy()
             legit_spread = (train_legit_emb - legit_centroid).pow(2).sum(-1).sqrt().cpu().numpy()
+            train_fraud_dist_to_legit = (train_fraud_emb - legit_centroid).pow(2).sum(-1).sqrt().cpu().numpy()
 
         test_y = data.y[data.test_mask].cpu().numpy()
 
@@ -390,12 +396,17 @@ def run(config: dict, n_triplets_per_epoch: int = 2000, margin: float = 1.0,
             wandb_run.summary[f"test_{k}"] = v
     wandb.finish()
 
+    # Rounded to 5 decimals -- full float64 precision buys nothing here and IEEE-CIS's test set
+    # (~88K, vs. Elliptic's ~8.8K) makes these arrays 10x bigger; unrounded, that's most of what
+    # pushed a return_embeddings=True IEEE-CIS run into the same silent RunPod payload-size
+    # failure (COMPLETED status, output=None) the 2026-07-21 fix addressed for Elliptic.
     result = {
         "test": test_metrics, "best_epoch": best_epoch,
-        "test_scores": test_scores.tolist(), "test_y": test_y.tolist(),
-        "dist_to_fraud": dist_to_fraud.tolist(), "dist_to_legit": dist_to_legit.tolist(),
+        "test_scores": np.round(test_scores, 5).tolist(), "test_y": test_y.tolist(),
+        "dist_to_fraud": np.round(dist_to_fraud, 5).tolist(), "dist_to_legit": np.round(dist_to_legit, 5).tolist(),
         "fraud_spread_mean": float(fraud_spread.mean()), "fraud_spread_std": float(fraud_spread.std()),
         "legit_spread_mean": float(legit_spread.mean()), "legit_spread_std": float(legit_spread.std()),
+        "train_fraud_dist_to_legit": np.round(train_fraud_dist_to_legit, 5).tolist(),
     }
     if return_embeddings:
         # Off by default -- only needed for the embedding-dimension / linear-probe analysis
