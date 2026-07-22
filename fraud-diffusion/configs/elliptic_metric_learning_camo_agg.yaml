@@ -1,0 +1,38 @@
+seed: 42
+
+data:
+  dataset: elliptic
+  raw_dir: data/raw/elliptic/elliptic_bitcoin_dataset
+  processed_path: data/processed/elliptic_graph.pt
+  train_end_step: 34
+  val_end_step: 41
+
+# GraphSAGECamoAgg + camo-weighted metric learning: extends the camo-weighting idea from the LOSS
+# (up-weight camouflaged fraud triplets) to the AGGREGATION step too -- neighbors that look
+# confidently legit (in raw feature space, distance to a fixed train-legit centroid) get more
+# weight in neighbor_mean, so the deviation feature is computed against a cleaner baseline instead
+# of one contaminated by already-ambiguous neighbors. Different mechanism from GraphSAGEGated's
+# learned similarity gate (Runs 59-61, 98-99: no real effect across every variant tried) -- this
+# reuses a signal already independently validated to matter (camo-weighted mining), applied at a
+# different point in the pipeline, instead of learning a new similarity function from scratch.
+model:
+  name: graphsage_camo_agg
+  hidden_dim: 128
+  num_layers: 2
+  dropout: 0.5
+
+train:
+  lr: 0.001
+  weight_decay: 0.00001
+  epochs: 1000
+  patience: 50
+  device: auto
+
+metric_learning:
+  enabled: true
+  margin: 1.0
+  mining: camo_weighted
+
+journal:
+  path: LAB_JOURNAL.md
+  run_name: elliptic_metric_learning_camo_agg

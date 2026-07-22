@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.nn import SAGEConv
 from torch_geometric.utils import scatter
+from torch_geometric.utils import softmax as scatter_softmax
 
 
 def _build_encoder(in_dim: int, feature_encoder_hidden_dim: int | None, dropout: float) -> tuple[nn.Module | None, int]:
@@ -265,6 +266,74 @@ class GraphSAGEDiff(nn.Module):
                 x = F.relu(x)
                 x = F.dropout(x, p=self.dropout, training=self.training)
         return x
+
+    def forward(self, x: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
+        return self.classifier(self.embed(x, edge_index)).squeeze(-1)  # raw logits, shape [N]
+
+
+class GraphSAGECamoAgg(nn.Module):
+    """GraphSAGEDiff + camo-aware aggregation (2026-07-22): the same distance-to-legit-centroid
+    signal that already works for camo-weighted metric learning's LOSS (up-weighting camouflaged
+    fraud triplets so they aren't drowned out during training), applied instead to the AGGREGATION
+    step -- neighbors that look confidently legit (far from the fraud centroid / close to the
+    legit one) get MORE weight in neighbor_mean, so the deviation feature (x - neighbor_mean) is
+    computed against a cleaner "what does normal actually look like here" baseline, instead of
+    being contaminated by neighbors that are themselves already ambiguous/camouflaged.
+
+    Different mechanism from GraphSAGEGated's learned sigmoid gate (Runs 59-61, 98-99: no real
+    effect across indirect supervision, direct y_src==y_dst supervision, or a weight sweep) --
+    that gate has to LEARN an arbitrary similarity function from scratch. This reuses a signal
+    already independently validated to matter (camo-weighted mining), just applied at a different
+    point in the pipeline, rather than learning a new one.
+
+    Avoids the chicken-and-egg problem of "need an embedding to compute weights that produce that
+    same embedding" by using a FIXED legit centroid computed ONCE from RAW features (not a live,
+    ever-changing embedding-space centroid) -- set via set_legit_centroid() after construction,
+    analogous to how _frequency_encode's train-only statistics are precomputed once rather than
+    recomputed live. Simpler than a live two-pass scheme; sacrifices some sophistication for a
+    version that's actually implementable without a live circular dependency."""
+
+    def __init__(self, in_dim: int, hidden_dim: int = 128, num_layers: int = 2, dropout: float = 0.3,
+                 classifier_hidden_dim: int | None = None, feature_encoder_hidden_dim: int | None = None):
+        super().__init__()
+        assert num_layers >= 1
+
+        self.encoder, conv_in_dim = _build_encoder(in_dim, feature_encoder_hidden_dim, dropout)
+        self.convs = nn.ModuleList()
+        self.convs.append(SAGEConv(conv_in_dim * 3, hidden_dim))
+        for _ in range(num_layers - 1):
+            self.convs.append(SAGEConv(hidden_dim, hidden_dim))
+
+        self.dropout = dropout
+        self.classifier = _build_classifier(hidden_dim, classifier_hidden_dim, dropout)
+        self.register_buffer("legit_centroid_raw", torch.zeros(in_dim))
+        self._centroid_set = False
+
+    def set_legit_centroid(self, x: torch.Tensor, train_legit_idx: torch.Tensor) -> None:
+        """Call once after construction, before training -- computes the fixed raw-feature-space
+        legit centroid from TRAIN legit nodes only (never touches val/test, same leakage
+        discipline as _frequency_encode's train-only statistics elsewhere in this codebase)."""
+        with torch.no_grad():
+            self.legit_centroid_raw.copy_(x[train_legit_idx].mean(dim=0))
+        self._centroid_set = True
+
+    def embed(self, x: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
+        """See GraphSAGE.embed's docstring — same rationale, for the GNN-embeddings+RF hybrid."""
+        assert self._centroid_set, "call set_legit_centroid() before training/inference"
+        src, dst = edge_index[0], edge_index[1]
+        dist_to_legit = (x - self.legit_centroid_raw).pow(2).sum(-1).sqrt()  # raw-space, fixed
+        edge_weight = scatter_softmax(-dist_to_legit[src], dst)  # per-destination-group softmax
+
+        x_enc = self.encoder(x) if self.encoder is not None else x
+        neighbor_weighted = scatter(edge_weight.unsqueeze(-1) * x_enc[src], dst, dim=0, dim_size=x.shape[0], reduce="sum")
+        h = torch.cat([x_enc, neighbor_weighted, x_enc - neighbor_weighted], dim=-1)
+
+        for i, conv in enumerate(self.convs):
+            h = conv(h, edge_index)
+            if i < len(self.convs) - 1:
+                h = F.relu(h)
+                h = F.dropout(h, p=self.dropout, training=self.training)
+        return h
 
     def forward(self, x: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
         return self.classifier(self.embed(x, edge_index)).squeeze(-1)  # raw logits, shape [N]

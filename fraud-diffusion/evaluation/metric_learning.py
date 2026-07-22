@@ -470,6 +470,9 @@ def run(config: dict, n_triplets_per_epoch: int = 2000, margin: float = 1.0,
         test_y = data.y[test_idx].cpu().numpy()
 
     else:
+        if hasattr(model, "set_legit_centroid"):
+            model.set_legit_centroid(data.x, train_legit_idx.to(device))
+
         for epoch in range(1, config["train"]["epochs"] + 1):
             model.train()
             optimizer.zero_grad()

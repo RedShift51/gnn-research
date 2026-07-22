@@ -19,7 +19,7 @@ from evaluation.metrics import compute_metrics
 from models.gnn.fagcn import FAGCN
 from models.gnn.gat import GAT
 from models.gnn.graphsage import (
-    GraphSAGE, GraphSAGEDiff, GraphSAGEDiffDegreeAware, GraphSAGEGated, GraphSAGESpectral,
+    GraphSAGE, GraphSAGECamoAgg, GraphSAGEDiff, GraphSAGEDiffDegreeAware, GraphSAGEGated, GraphSAGESpectral,
 )
 from training.ema import EMA
 from training.losses import FocalLoss
@@ -80,6 +80,15 @@ def build_model(config: dict, in_dim: int) -> nn.Module:
             classifier_hidden_dim=mcfg.get("classifier_hidden_dim"),
             feature_encoder_hidden_dim=mcfg.get("feature_encoder_hidden_dim"),
         )
+    if name == "graphsage_camo_agg":
+        return GraphSAGECamoAgg(
+            in_dim=in_dim,
+            hidden_dim=mcfg["hidden_dim"],
+            num_layers=mcfg["num_layers"],
+            dropout=mcfg["dropout"],
+            classifier_hidden_dim=mcfg.get("classifier_hidden_dim"),
+            feature_encoder_hidden_dim=mcfg.get("feature_encoder_hidden_dim"),
+        )
     if name == "graphsage_gated":
         return GraphSAGEGated(
             in_dim=in_dim,
@@ -119,7 +128,8 @@ def build_model(config: dict, in_dim: int) -> nn.Module:
         )
     raise ValueError(
         f"Unknown model.name in config: {name!r} (expected 'graphsage', 'graphsage_diff', "
-        "'graphsage_diff_degree_aware', 'graphsage_gated', 'graphsage_spectral', 'fagcn', or 'gat')"
+        "'graphsage_diff_degree_aware', 'graphsage_gated', 'graphsage_camo_agg', 'graphsage_spectral', "
+        "'fagcn', or 'gat')"
     )
 
 
