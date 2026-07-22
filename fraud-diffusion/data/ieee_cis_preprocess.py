@@ -104,6 +104,28 @@ def build_edges(df: pd.DataFrame, max_node_degree: int) -> np.ndarray:
     return np.ascontiguousarray(edge_arr)  # NeighborLoader's CSC sampler needs contiguous memory
 
 
+def build_entity_sequences(df: pd.DataFrame, entity_col: str, seq_len: int) -> np.ndarray:
+    """For each transaction, the indices of its own entity's (card1's) previous `seq_len`
+    transactions, oldest-first, RIGHT-aligned (most recent immediately before it in the last
+    column; -1 padding at the START where fewer than seq_len exist). Feeds an RNN branch that
+    explicitly encodes each transaction's own entity's ORDERED recent history -- distinct from
+    build_edges' GNN aggregation, which treats same-entity neighbors as an unordered set (mean/
+    diff aggregation) and never models temporal order among them. NaN entity values get no
+    sequence at all (an all-padding row) -- a shared NaN isn't a shared entity, same rationale as
+    build_edges."""
+    n = len(df)
+    seq_idx = np.full((n, seq_len), -1, dtype=np.int64)
+    for key, group in df.groupby(entity_col).groups.items():
+        if pd.isna(key):
+            continue
+        idxs = sorted(group)
+        for pos, i in enumerate(idxs):
+            start = max(0, pos - seq_len)
+            prev = idxs[start:pos]
+            seq_idx[i, seq_len - len(prev):] = prev
+    return seq_idx
+
+
 def temporal_split_masks(n: int, train_frac: float, val_frac: float) -> tuple:
     """Same convention as data/paysim_preprocess.py's temporal_split_masks -- row position IS
     temporal position here (df sorted by TransactionDT before this runs)."""
@@ -171,6 +193,18 @@ def run_from_config(config: dict) -> Path:
     edge_index = build_edges(df, data_cfg["max_node_degree"])
     logger.info(f"Built {edge_index.shape[1]} directed edges over {n} nodes")
 
+    seq_len = data_cfg.get("entity_seq_len")
+    seq_indices = None
+    if seq_len:
+        # Causal by construction: for any node, build_entity_sequences only ever looks at STRICTLY
+        # earlier same-entity rows in the globally time-sorted df, regardless of train/val/test
+        # split -- a test-period node's sequence may legitimately include train/val-period rows
+        # (that's just real, earlier history, not leakage), and no node's sequence can ever include
+        # a later row. No extra leakage-guard needed, unlike edge_index above.
+        seq_indices = build_entity_sequences(df, data_cfg.get("entity_seq_col", "card1"), seq_len)
+        logger.info(f"Built entity sequences (col={data_cfg.get('entity_seq_col', 'card1')}, "
+                    f"seq_len={seq_len}): {(seq_indices >= 0).any(axis=1).sum()}/{n} nodes have >=1 prior transaction")
+
     # Leakage-free temporal edge splits (see data/temporal_edges.py; arXiv 2604.19514) -- same
     # -1 boundary-alignment rationale as data/paysim_preprocess.py (temporal_split_masks uses
     # exclusive Python-slice boundaries, split_edge_index_by_time uses inclusive "<=").
@@ -191,6 +225,8 @@ def run_from_config(config: dict) -> Path:
         val_mask=torch.from_numpy(val_mask),
         test_mask=torch.from_numpy(test_mask),
     )
+    if seq_indices is not None:
+        data.seq_indices = torch.from_numpy(seq_indices)
 
     out_path = ROOT / data_cfg["processed_path"]
     out_path.parent.mkdir(parents=True, exist_ok=True)

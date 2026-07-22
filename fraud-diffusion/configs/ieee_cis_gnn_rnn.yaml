@@ -1,0 +1,52 @@
+seed: 42
+
+data:
+  dataset: ieee_cis
+  transaction_csv: data/raw/ieee_cis/train_transaction.csv
+  identity_csv: data/raw/ieee_cis/train_identity.csv
+  processed_path: data/processed/ieee_cis_graph_rnn.pt
+  subsample_size: null
+  max_node_degree: 20
+  train_frac: 0.70
+  val_frac: 0.15
+  test_frac: 0.15
+  entity_seq_col: card1
+  entity_seq_len: 8
+
+# GraphSAGEDiff (card1/addr1-sharing edges, unordered neighbor aggregation) + GRU (each
+# transaction's own card1's PRIOR transactions, in time order) -- 2026-07-22 discussion of
+# temporal-sequence techniques (diffusion forcing / self-forcing / framepack): none of those
+# transplant directly, but the underlying idea -- a per-entity temporal sequence encoder -- is
+# real and testable on its own merits. Different, separate processed_path from the plain
+# classification config since this one carries the extra seq_indices tensor.
+model:
+  name: graphsage_diff  # GNN branch architecture; the GRU branch is fixed inside GraphSAGERNN
+  hidden_dim: 128
+  num_layers: 2
+  dropout: 0.5
+
+loss:
+  name: focal
+  alpha: 0.75
+  gamma: 2.0
+
+train:
+  lr: 0.001
+  weight_decay: 0.00001
+  epochs: 1000
+  patience: 50
+  device: auto
+  mini_batch: true
+  batch_size: 1024
+  num_neighbors: [15, 10]
+
+gnn_rnn:
+  enabled: true
+  rnn_hidden_dim: 64
+
+debug:
+  return_test_predictions: true
+
+journal:
+  path: LAB_JOURNAL.md
+  run_name: ieee_cis_gnn_rnn

@@ -137,6 +137,11 @@ def handler(job):
                                           temperature=mcfg.get("temperature", 0.1),
                                           align_weight=mcfg.get("align_weight", 1.0),
                                           uniform_weight=mcfg.get("uniform_weight", 1.0))
+        elif config.get("gnn_rnn", {}).get("enabled"):
+            # GraphSAGEDiff (card1/addr1-sharing edges) + GRU (each transaction's own entity's
+            # prior transactions, in time order) -- see evaluation/gnn_rnn_hybrid.py.
+            from evaluation.gnn_rnn_hybrid import run as gnn_rnn_run
+            result = gnn_rnn_run(config, rnn_hidden_dim=config["gnn_rnn"].get("rnn_hidden_dim", 64))
         else:
             result = train_run(config, config_label, git_commit=commit_sha)
     except torch.cuda.OutOfMemoryError:
