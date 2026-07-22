@@ -1,0 +1,46 @@
+seed: 42
+
+data:
+  dataset: ieee_cis
+  transaction_csv: data/raw/ieee_cis/train_transaction.csv
+  identity_csv: data/raw/ieee_cis/train_identity.csv
+  processed_path: data/processed/ieee_cis_graph_full_v2.pt
+  subsample_size: null
+  max_node_degree: 20
+  train_frac: 0.70
+  val_frac: 0.15
+  test_frac: 0.15
+  uid_features: true
+  uid_graph: true
+
+# Same random-triplet metric learning as ieee_cis_metric_learning.yaml, on the richer Run 94/95
+# feature set + uid-augmented graph. Prior metric-learning result on the plain feature set had a
+# hard-core AUC ceiling of ~0.74-0.75 regardless of mining strategy (random/camo_weighted/
+# semi_hard all landed there) -- worth checking whether richer features/graph move that ceiling at
+# all, now that RF alone reaches 0.839 on the same population.
+model:
+  name: graphsage_diff
+  hidden_dim: 128
+  num_layers: 2
+  dropout: 0.5
+
+train:
+  lr: 0.001
+  weight_decay: 0.00001
+  epochs: 1000
+  patience: 50
+  device: auto
+  mini_batch: true
+  batch_size: 1024
+  num_neighbors: [15, 10]
+
+metric_learning:
+  enabled: true
+  margin: 1.0
+  mining: random
+  return_embeddings: false
+  legit_ref_size: 3000
+
+journal:
+  path: LAB_JOURNAL.md
+  run_name: ieee_cis_metric_learning_full

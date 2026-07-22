@@ -1,0 +1,50 @@
+seed: 42
+
+data:
+  dataset: ieee_cis
+  transaction_csv: data/raw/ieee_cis/train_transaction.csv
+  identity_csv: data/raw/ieee_cis/train_identity.csv
+  processed_path: data/processed/ieee_cis_graph_full_v2.pt
+  subsample_size: null
+  max_node_degree: 20
+  train_frac: 0.70
+  val_frac: 0.15
+  test_frac: 0.15
+  uid_features: true
+  uid_graph: true
+
+# Run 94/95: V-columns (minus the documented-bad V322-V339 block) + UID (client) reconstruction
+# features, PLUS "uid" wired into the graph itself as a third entity-edge column alongside
+# card1/addr1. Same mini-batch setup as ieee_cis_graphsage_diff_minibatch.yaml -- richer
+# features/graph, otherwise unchanged, so this is a clean before/after comparison against the
+# plain-feature GraphSAGEDiff baseline (test AUC=0.855) and the new RF-with-these-same-features
+# bar (hard-core AUC=0.839, F1=0.755).
+model:
+  name: graphsage_diff
+  hidden_dim: 128
+  num_layers: 2
+  dropout: 0.5
+
+loss:
+  name: focal
+  alpha: 0.75
+  gamma: 2.0
+
+train:
+  lr: 0.001
+  weight_decay: 0.00001
+  epochs: 1000
+  patience: 50
+  device: auto
+  ema_decay: 0.98
+  ema_start_epoch: 30
+  mini_batch: true
+  batch_size: 1024
+  num_neighbors: [15, 10]
+
+debug:
+  return_test_predictions: true
+
+journal:
+  path: LAB_JOURNAL.md
+  run_name: ieee_cis_graphsage_diff_full_minibatch
