@@ -339,6 +339,62 @@ class GraphSAGECamoAgg(nn.Module):
         return self.classifier(self.embed(x, edge_index)).squeeze(-1)  # raw logits, shape [N]
 
 
+class GraphSAGEDualView(nn.Module):
+    """HOT-GNN-inspired decoupled homophily/heterophily aggregation (CLAUDE.md's "current SOTA to
+    beat" innovation #1: separate message-passing views for homophilic vs heterophilic neighbors,
+    fused via attention/concat instead of one mean that mixes both). Genuinely different mechanism
+    from everything else tried this session at the aggregation level:
+      - GraphSAGECamoAgg (Run 100/101, washed) weights ALL neighbors by ONE signal -- distance to
+        a FIXED, externally-supplied legit centroid.
+      - GraphSAGEGated (Runs 59-61, 98-99, no effect) learns ONE scalar per-edge gate from scratch,
+        with no explicit homophily/heterophily structure.
+    This computes PAIRWISE src-dst similarity (no external reference point needed) and maintains
+    TWO separate softmax-weighted aggregation channels: a homophilic one (weight concentrates on
+    similar neighbors) and a heterophilic one (weight concentrates on dissimilar neighbors) --
+    fraud's camouflage signature (Run 46: fraud-touching edges only 41% homophilic vs the general
+    graph) should show up as a distinctive heterophilic-channel profile that a single mixed mean
+    can't isolate. Meant to pair with camo-weighted metric learning (this project's own confirmed
+    lever) in place of HOT-GNN's own classification objective, not to reproduce HOT-GNN wholesale
+    (its HOS edge-similarity measure and temporal positional encoding are NOT included here)."""
+
+    def __init__(self, in_dim: int, hidden_dim: int = 128, num_layers: int = 2, dropout: float = 0.3,
+                 classifier_hidden_dim: int | None = None, feature_encoder_hidden_dim: int | None = None):
+        super().__init__()
+        assert num_layers >= 1
+
+        self.encoder, conv_in_dim = _build_encoder(in_dim, feature_encoder_hidden_dim, dropout)
+        self.convs = nn.ModuleList()
+        self.convs.append(SAGEConv(conv_in_dim * 3, hidden_dim))
+        for _ in range(num_layers - 1):
+            self.convs.append(SAGEConv(hidden_dim, hidden_dim))
+
+        self.dropout = dropout
+        self.classifier = _build_classifier(hidden_dim, classifier_hidden_dim, dropout)
+
+    def embed(self, x: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
+        """See GraphSAGE.embed's docstring — same rationale, for the GNN-embeddings+RF hybrid."""
+        x_enc = self.encoder(x) if self.encoder is not None else x
+        src, dst = edge_index[0], edge_index[1]
+
+        sim = F.cosine_similarity(x_enc[src], x_enc[dst], dim=-1)  # pairwise, no external reference
+        homophily_weight = scatter_softmax(sim, dst)       # concentrates on SIMILAR neighbors
+        heterophily_weight = scatter_softmax(-sim, dst)    # concentrates on DISSIMILAR neighbors
+
+        homophilic_agg = scatter(homophily_weight.unsqueeze(-1) * x_enc[src], dst, dim=0, dim_size=x.shape[0], reduce="sum")
+        heterophilic_agg = scatter(heterophily_weight.unsqueeze(-1) * x_enc[src], dst, dim=0, dim_size=x.shape[0], reduce="sum")
+        h = torch.cat([x_enc, homophilic_agg, heterophilic_agg], dim=-1)
+
+        for i, conv in enumerate(self.convs):
+            h = conv(h, edge_index)
+            if i < len(self.convs) - 1:
+                h = F.relu(h)
+                h = F.dropout(h, p=self.dropout, training=self.training)
+        return h
+
+    def forward(self, x: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
+        return self.classifier(self.embed(x, edge_index)).squeeze(-1)  # raw logits, shape [N]
+
+
 class GraphSAGEDiffDegreeAware(GraphSAGEDiff):
     """GraphSAGEDiff + an explicit log1p(degree) feature concatenated right before the classifier
     -- directly targets LAB_JOURNAL.md Run 67's finding #2: GraphSAGEDiff's own EXTRA mistakes
