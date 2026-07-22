@@ -1,0 +1,36 @@
+seed: 42
+
+data:
+  dataset: elliptic
+  raw_dir: data/raw/elliptic/elliptic_bitcoin_dataset
+  processed_path: data/processed/elliptic_graph.pt
+  train_end_step: 34
+  val_end_step: 41
+
+# camo_weighted_margin_scale: alternative mechanism to camo_weighted's loss-reweighting. Instead
+# of scaling the LOSS VALUE by camouflage severity (leaving the fixed margin's gradient direction
+# untouched), scales the MARGIN itself per triplet -- a camouflaged anchor is optimized toward a
+# strictly larger enforced separation from its negative, not just a bigger gradient at a fixed
+# target. margin_scale=1.0: the most-camouflaged anchor in a batch gets up to ~2x the base margin.
+model:
+  name: graphsage_diff
+  hidden_dim: 128
+  num_layers: 2
+  dropout: 0.5
+
+train:
+  lr: 0.001
+  weight_decay: 0.00001
+  epochs: 1000
+  patience: 50
+  device: auto
+
+metric_learning:
+  enabled: true
+  margin: 1.0
+  mining: camo_weighted_margin_scale
+  margin_scale: 1.0
+
+journal:
+  path: LAB_JOURNAL.md
+  run_name: elliptic_metric_learning_camo_weighted_margin_scale

@@ -137,7 +137,9 @@ def handler(job):
                                           temperature=mcfg.get("temperature", 0.1),
                                           align_weight=mcfg.get("align_weight", 1.0),
                                           uniform_weight=mcfg.get("uniform_weight", 1.0),
-                                          gate_aux_weight=mcfg.get("gate_aux_weight", 0.0))
+                                          gate_aux_weight=mcfg.get("gate_aux_weight", 0.0),
+                                          camo_temperature=mcfg.get("camo_temperature", 1.0),
+                                          margin_scale=mcfg.get("margin_scale", 1.0))
         elif config.get("gnn_rnn", {}).get("enabled"):
             # GraphSAGEDiff (card1/addr1-sharing edges) + GRU (each transaction's own entity's
             # prior transactions, in time order) -- see evaluation/gnn_rnn_hybrid.py.

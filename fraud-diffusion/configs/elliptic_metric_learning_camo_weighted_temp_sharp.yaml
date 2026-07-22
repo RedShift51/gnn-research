@@ -1,0 +1,36 @@
+seed: 42
+
+data:
+  dataset: elliptic
+  raw_dir: data/raw/elliptic/elliptic_bitcoin_dataset
+  processed_path: data/processed/elliptic_graph.pt
+  train_end_step: 34
+  val_end_step: 41
+
+# camo_weighted_temp: same recipe as camo_weighted, generalized with an explicit softmax
+# temperature over the camouflage weight. camo_temperature=0.3 sharpens the distribution --
+# concentrates weight on the single most-camouflaged anchors in each batch (approaching hard
+# selection as T->0), instead of the near-uniform-ish weighting the original (implicit T=1, in raw
+# squared-distance units) produces.
+model:
+  name: graphsage_diff
+  hidden_dim: 128
+  num_layers: 2
+  dropout: 0.5
+
+train:
+  lr: 0.001
+  weight_decay: 0.00001
+  epochs: 1000
+  patience: 50
+  device: auto
+
+metric_learning:
+  enabled: true
+  margin: 1.0
+  mining: camo_weighted_temp
+  camo_temperature: 0.3
+
+journal:
+  path: LAB_JOURNAL.md
+  run_name: elliptic_metric_learning_camo_weighted_temp_sharp

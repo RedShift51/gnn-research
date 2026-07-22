@@ -106,7 +106,8 @@ def _embed_nodes(model, data_view, node_ids: torch.Tensor, num_neighbors: list, 
 
 
 def _camo_weighted_loss(embeddings: torch.Tensor, anchor_idx: torch.Tensor, pos_idx: torch.Tensor,
-                         neg_idx: torch.Tensor, legit_centroid: torch.Tensor, margin: float) -> torch.Tensor:
+                         neg_idx: torch.Tensor, legit_centroid: torch.Tensor, margin: float,
+                         temperature: float = 1.0) -> torch.Tensor:
     """Soft importance-weighted triplet loss -- a gentler alternative to _hard_triplets' all-or-
     nothing hardest-example selection (Run 79: that destabilized training badly, F1 crashed to
     0.325). Same RANDOM triplets as _sample_triplets, but each triplet's loss contribution is
@@ -115,7 +116,10 @@ def _camo_weighted_loss(embeddings: torch.Tensor, anchor_idx: torch.Tensor, pos_
     a camouflaged sub-cluster that already exists (at ~40% prevalence) within the easy, well-
     classified period, but gets diluted by averaging with the "obvious" majority in the current
     (unweighted) triplet loss. Softmax weighting (not hard top-1 selection) keeps every triplet
-    contributing something, avoiding the non-stationary "hardest changes every epoch" instability."""
+    contributing something, avoiding the non-stationary "hardest changes every epoch" instability.
+    temperature=1.0 reproduces the original recipe exactly; <1 sharpens the weight distribution
+    toward the single most-camouflaged anchors (approaching hard selection as T->0), >1 flattens it
+    toward uniform (approaching plain unweighted triplet loss as T->inf)."""
     anchor = embeddings[anchor_idx]
     pos = embeddings[pos_idx]
     neg = embeddings[neg_idx]
@@ -124,9 +128,57 @@ def _camo_weighted_loss(embeddings: torch.Tensor, anchor_idx: torch.Tensor, pos_
     per_triplet_loss = F.relu(d_pos - d_neg + margin)
 
     dist_to_legit = (anchor - legit_centroid).pow(2).sum(-1).sqrt()
-    weight = torch.softmax(-dist_to_legit, dim=0) * len(dist_to_legit)  # mean weight ~= 1
+    weight = torch.softmax(-dist_to_legit / temperature, dim=0) * len(dist_to_legit)  # mean weight ~= 1
     return (per_triplet_loss * weight.detach()).mean()  # detach: weight is a sampling emphasis,
     # not something the anchor's position should be optimized to change
+
+
+def _camo_weighted_dual_loss(embeddings: torch.Tensor, anchor_idx: torch.Tensor, pos_idx: torch.Tensor,
+                              neg_idx: torch.Tensor, legit_centroid: torch.Tensor, fraud_centroid: torch.Tensor,
+                              margin: float, temperature: float = 1.0) -> torch.Tensor:
+    """Dual-sided extension of _camo_weighted_loss: the original recipe only up-weights triplets
+    by how camouflaged the fraud ANCHOR looks (close to the legit centroid). This adds a second,
+    symmetric signal -- how camouflaged the randomly-sampled legit NEGATIVE looks (close to the
+    fraud centroid), i.e. a naturally confusable legit example that random sampling would otherwise
+    treat the same as an obviously-legit one. A triplet hard on EITHER end gets emphasized. Cheaper
+    than _semi_hard_negatives' explicit closest-legit-candidate search (no per-anchor scan over a
+    legit pool) and avoids reintroducing _hard_triplets' full top-1 instability -- still a softmax
+    over the whole sampled batch, just with two additive terms instead of one."""
+    anchor = embeddings[anchor_idx]
+    pos = embeddings[pos_idx]
+    neg = embeddings[neg_idx]
+    d_pos = (anchor - pos).pow(2).sum(-1)
+    d_neg = (anchor - neg).pow(2).sum(-1)
+    per_triplet_loss = F.relu(d_pos - d_neg + margin)
+
+    dist_anchor_to_legit = (anchor - legit_centroid).pow(2).sum(-1).sqrt()
+    dist_neg_to_fraud = (neg - fraud_centroid).pow(2).sum(-1).sqrt()
+    combined_score = -dist_anchor_to_legit - dist_neg_to_fraud
+    weight = torch.softmax(combined_score / temperature, dim=0) * len(combined_score)  # mean weight ~= 1
+    return (per_triplet_loss * weight.detach()).mean()
+
+
+def _camo_weighted_adaptive_margin_loss(embeddings: torch.Tensor, anchor_idx: torch.Tensor, pos_idx: torch.Tensor,
+                                         neg_idx: torch.Tensor, legit_centroid: torch.Tensor, margin: float,
+                                         margin_scale: float = 1.0) -> torch.Tensor:
+    """Alternative mechanism to _camo_weighted_loss: instead of reweighting the LOSS VALUE by
+    camouflage severity (leaving the fixed margin's gradient direction untouched), scales the
+    MARGIN itself per triplet -- a camouflaged anchor is required to achieve a strictly larger
+    enforced separation from its negative than an obvious one, rather than just contributing a
+    bigger gradient at a fixed target. margin_scale controls how much the margin can grow above/
+    shrink below the base margin (1.0 = the most camouflaged anchor in the batch gets up to ~2x
+    margin, the mean multiplier stays ~=1 since camo_weight's softmax already averages to 1)."""
+    anchor = embeddings[anchor_idx]
+    pos = embeddings[pos_idx]
+    neg = embeddings[neg_idx]
+    d_pos = (anchor - pos).pow(2).sum(-1)
+    d_neg = (anchor - neg).pow(2).sum(-1)
+
+    dist_to_legit = (anchor - legit_centroid).pow(2).sum(-1).sqrt()
+    camo_weight = torch.softmax(-dist_to_legit, dim=0) * len(dist_to_legit)  # mean weight ~= 1
+    adaptive_margin = margin * (1.0 + margin_scale * (camo_weight.detach() - 1.0))
+    per_triplet_loss = F.relu(d_pos - d_neg + adaptive_margin)
+    return per_triplet_loss.mean()
 
 
 def _centroid_scores(embeddings: torch.Tensor, fraud_centroid: torch.Tensor,
@@ -310,7 +362,7 @@ def _align_uniform_loss(embeddings: torch.Tensor, fraud_idx: torch.Tensor, legit
 def run(config: dict, n_triplets_per_epoch: int = 2000, margin: float = 1.0,
         compression_weight: float = 0.0, return_embeddings: bool = False, mining: str = "random",
         temperature: float = 0.1, align_weight: float = 1.0, uniform_weight: float = 1.0,
-        gate_aux_weight: float = 0.0) -> dict:
+        gate_aux_weight: float = 0.0, camo_temperature: float = 1.0, margin_scale: float = 1.0) -> dict:
     wandb_run = init_wandb(config, "metric_learning")
     set_seed(config["seed"])
     device = pick_device(config["train"]["device"])
@@ -491,6 +543,33 @@ def run(config: dict, n_triplets_per_epoch: int = 2000, margin: float = 1.0,
                 legit_centroid_live = embeddings[train_legit_idx.to(device)].mean(dim=0)
                 loss = _camo_weighted_loss(embeddings, anchor_idx.to(device), pos_idx.to(device), neg_idx.to(device),
                                             legit_centroid_live, margin)
+            elif mining == "camo_weighted_temp":
+                # Same recipe as camo_weighted, generalized with an explicit softmax temperature --
+                # sharper (<1) concentrates weight on the single most-camouflaged anchors in the
+                # batch (approaching hard selection); flatter (>1) approaches unweighted random.
+                anchor_idx, pos_idx, neg_idx = _sample_triplets(train_fraud_idx, train_legit_idx, n_triplets_per_epoch, generator)
+                legit_centroid_live = embeddings[train_legit_idx.to(device)].mean(dim=0)
+                loss = _camo_weighted_loss(embeddings, anchor_idx.to(device), pos_idx.to(device), neg_idx.to(device),
+                                            legit_centroid_live, margin, temperature=camo_temperature)
+            elif mining == "camo_weighted_dual":
+                # Extends camo_weighted's anchor-side camouflage signal with a symmetric
+                # negative-side one -- also up-weights triplets whose randomly-sampled legit
+                # negative already looks fraud-like (close to the fraud centroid), not just
+                # triplets whose fraud anchor looks legit-like.
+                anchor_idx, pos_idx, neg_idx = _sample_triplets(train_fraud_idx, train_legit_idx, n_triplets_per_epoch, generator)
+                legit_centroid_live = embeddings[train_legit_idx.to(device)].mean(dim=0)
+                fraud_centroid_live = embeddings[train_fraud_idx.to(device)].mean(dim=0)
+                loss = _camo_weighted_dual_loss(embeddings, anchor_idx.to(device), pos_idx.to(device), neg_idx.to(device),
+                                                 legit_centroid_live, fraud_centroid_live, margin, temperature=camo_temperature)
+            elif mining == "camo_weighted_margin_scale":
+                # Alternative mechanism to camo_weighted's loss-reweighting: scales the MARGIN
+                # itself by camouflage severity instead, so camouflaged anchors are optimized
+                # toward a strictly larger enforced separation, not just a bigger gradient at a
+                # fixed target.
+                anchor_idx, pos_idx, neg_idx = _sample_triplets(train_fraud_idx, train_legit_idx, n_triplets_per_epoch, generator)
+                legit_centroid_live = embeddings[train_legit_idx.to(device)].mean(dim=0)
+                loss = _camo_weighted_adaptive_margin_loss(embeddings, anchor_idx.to(device), pos_idx.to(device), neg_idx.to(device),
+                                                            legit_centroid_live, margin, margin_scale=margin_scale)
             elif mining == "semi_hard":
                 anchor_emb, pos_emb, neg_emb = _semi_hard_triplets(embeddings, train_fraud_idx.to(device), train_legit_idx.to(device),
                                                                      n_triplets_per_epoch, generator)
@@ -514,6 +593,7 @@ def run(config: dict, n_triplets_per_epoch: int = 2000, margin: float = 1.0,
                                             generator, n_triplets_per_epoch, align_weight, uniform_weight)
             else:
                 raise ValueError(f"Unknown mining: {mining!r} (expected 'random', 'hard', 'camo_weighted', "
+                                  f"'camo_weighted_temp', 'camo_weighted_dual', 'camo_weighted_margin_scale', "
                                   f"'semi_hard', 'multi_prototype', 'supcon', or 'align_uniform')")
             if compression_weight > 0:
                 comp_loss = _compression_loss(embeddings, train_fraud_idx.to(device), train_legit_idx.to(device))

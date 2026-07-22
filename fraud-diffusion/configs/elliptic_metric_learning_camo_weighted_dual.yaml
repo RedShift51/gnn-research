@@ -1,0 +1,37 @@
+seed: 42
+
+data:
+  dataset: elliptic
+  raw_dir: data/raw/elliptic/elliptic_bitcoin_dataset
+  processed_path: data/processed/elliptic_graph.pt
+  train_end_step: 34
+  val_end_step: 41
+
+# camo_weighted_dual: extends camo_weighted's anchor-side camouflage signal with a symmetric
+# negative-side one. Original recipe only up-weights triplets whose fraud ANCHOR looks legit-like
+# (close to the legit centroid); this also up-weights triplets whose randomly-sampled legit
+# NEGATIVE already looks fraud-like (close to the fraud centroid) -- a naturally confusable legit
+# example random sampling would otherwise treat the same as an obviously-legit one. Cheaper than
+# semi_hard's explicit closest-legit-candidate scan, and avoids _hard_triplets' full top-1
+# instability (still a softmax over the whole batch, just two additive terms instead of one).
+model:
+  name: graphsage_diff
+  hidden_dim: 128
+  num_layers: 2
+  dropout: 0.5
+
+train:
+  lr: 0.001
+  weight_decay: 0.00001
+  epochs: 1000
+  patience: 50
+  device: auto
+
+metric_learning:
+  enabled: true
+  margin: 1.0
+  mining: camo_weighted_dual
+
+journal:
+  path: LAB_JOURNAL.md
+  run_name: elliptic_metric_learning_camo_weighted_dual
