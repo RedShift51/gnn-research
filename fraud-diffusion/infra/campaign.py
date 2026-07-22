@@ -99,7 +99,7 @@ def run_campaign(endpoint_id: str, best_config_path: str, candidate_paths: list,
             logger.error(f"Campaign: {candidate_path} crashed ({e}) -- skipping, keeping current best")
             history.append({
                 "best_before": current_best, "candidate": candidate_path, "report": None,
-                "promoted": False, "decision": f"CRASHED: {e}", "journal_run_id": None,
+                "promoted": False, "decision": f"CRASHED: {e}", "journal_run_id": None, "raw": None,
             })
             continue
 
@@ -147,6 +147,11 @@ def run_campaign(endpoint_id: str, best_config_path: str, candidate_paths: list,
             "promoted": promoted,
             "decision": decision,
             "journal_run_id": run_id,
+            # Full per-seed raw output (compare() already computes this -- e.g. metric_learning.py
+            # configs' test_scores/test_y per seed -- but it was being discarded here, forcing a
+            # separate re-dispatch any time a downstream check (hard-core cross-reference, a
+            # different metric than the campaign's own promotion criterion) was needed. 2026-07-22.
+            "raw": {"config_a": result["config_a"]["raw"], "config_b": result["config_b"]["raw"]},
         })
 
         if promoted:
