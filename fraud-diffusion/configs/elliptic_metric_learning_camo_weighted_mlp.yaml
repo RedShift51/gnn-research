@@ -44,6 +44,11 @@ metric_learning:
   camo_mlp_ema_decay: 0.9
   camo_mlp_warmup_epochs: 40
   camo_mlp_anchor_weight: 0.1
+  # Explicit push for the fraud/legit centroids to separate further -- the margin-based triplet
+  # loss saturates (F.relu(...)=0) once satisfied and stops rewarding extra separation; this has
+  # no such ceiling. Untested weight -- 0.1 is a starting guess (loss magnitudes are roughly the
+  # same order as the triplet loss itself), not a tuned value.
+  separation_weight: 0.1
 
 journal:
   path: LAB_JOURNAL.md

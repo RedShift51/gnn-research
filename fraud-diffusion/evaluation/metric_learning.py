@@ -328,6 +328,23 @@ def _compression_loss(embeddings: torch.Tensor, fraud_idx: torch.Tensor, legit_i
     return fraud_var + legit_var
 
 
+def _centroid_separation_loss(embeddings: torch.Tensor, fraud_idx: torch.Tensor, legit_idx: torch.Tensor) -> torch.Tensor:
+    """Explicit push for the fraud and legit centroids to sit far apart -- the complement of
+    _compression_loss's within-class pull, but a between-class push instead. Motivated by a real
+    gap the margin-based triplet loss leaves open: once d_neg - d_pos exceeds `margin`,
+    F.relu(...) saturates at exactly 0 and stops rewarding any FURTHER separation -- the loss is
+    fully satisfied long before the two classes are anywhere near maximally separated (embeddings
+    are unit-normalized, so ||fraud_centroid - legit_centroid||^2 can reach up to 4 for antipodal
+    centroids, far past where a margin=1.0 triplet loss already reports zero loss). This term has
+    no such ceiling: minimizing it is equivalent to maximizing squared inter-centroid distance
+    without bound (up to the unit-sphere geometry itself). Generic add-on, not tied to any one
+    mining mode -- wired in `run()` as an optional weighted term alongside compression_weight,
+    composable with camo_weighted_mlp or anything else."""
+    fraud_centroid = embeddings[fraud_idx].mean(dim=0)
+    legit_centroid = embeddings[legit_idx].mean(dim=0)
+    return -(fraud_centroid - legit_centroid).pow(2).sum(-1)
+
+
 def _semi_hard_negatives(anchor_emb: torch.Tensor, pos_emb: torch.Tensor, legit_emb: torch.Tensor) -> torch.Tensor:
     """Semi-hard negative SELECTION (Schroff et al. 2015, FaceNet), pure tensor op -- for each
     (anchor, positive) pair, picks the CLOSEST legit candidate that's still farther than the
@@ -482,7 +499,8 @@ def run(config: dict, n_triplets_per_epoch: int = 2000, margin: float = 1.0,
         temperature: float = 0.1, align_weight: float = 1.0, uniform_weight: float = 1.0,
         gate_aux_weight: float = 0.0, camo_temperature: float = 1.0, margin_scale: float = 1.0,
         camo_mlp_hidden_dim: int = 32, camo_mlp_ema_decay: float = 0.9,
-        camo_mlp_warmup_epochs: int = 40, camo_mlp_anchor_weight: float = 0.1) -> dict:
+        camo_mlp_warmup_epochs: int = 40, camo_mlp_anchor_weight: float = 0.1,
+        separation_weight: float = 0.0) -> dict:
     wandb_run = init_wandb(config, "metric_learning")
     set_seed(config["seed"])
     device = pick_device(config["train"]["device"])
@@ -778,6 +796,9 @@ def run(config: dict, n_triplets_per_epoch: int = 2000, margin: float = 1.0,
             if compression_weight > 0:
                 comp_loss = _compression_loss(embeddings, train_fraud_idx.to(device), train_legit_idx.to(device))
                 loss = loss + compression_weight * comp_loss
+            if separation_weight > 0:
+                sep_loss = _centroid_separation_loss(embeddings, train_fraud_idx.to(device), train_legit_idx.to(device))
+                loss = loss + separation_weight * sep_loss
             if gate_aux_weight > 0 and hasattr(model, "gate_logits"):
                 # Directly supervises GraphSAGEGated's per-edge gate against y_src==y_dst on
                 # known-labeled training edges -- same mechanism as train_gnn.py's
