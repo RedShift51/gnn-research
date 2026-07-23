@@ -26,6 +26,7 @@ import logging
 
 import numpy as np
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 import wandb
 from sklearn.mixture import GaussianMixture
@@ -179,6 +180,123 @@ def _camo_weighted_adaptive_margin_loss(embeddings: torch.Tensor, anchor_idx: to
     adaptive_margin = margin * (1.0 + margin_scale * (camo_weight.detach() - 1.0))
     per_triplet_loss = F.relu(d_pos - d_neg + adaptive_margin)
     return per_triplet_loss.mean()
+
+
+class _CamoWeightMLP(nn.Module):
+    """Learned replacement for _camo_weighted_loss's hand-designed `softmax(-dist_to_legit)`
+    scoring function -- takes a RICHER per-anchor feature set (its own embedding plus both
+    centroid distances, not just the single scalar dist_to_legit) and outputs one importance
+    logit per anchor, softmax-normalized the same way as every other camo_weighted variant.
+    Deliberately tiny (one hidden layer) -- ~150-200 camouflaged training examples per epoch is
+    not enough signal to justify anything bigger, and this is already a small-sample-overfitting
+    risk on top of the collapse risk below.
+
+    KNOWN RISK, not fully resolved by this implementation (2026-07-23 discussion): the MLP is
+    trained by a term that lets it look at each triplet's OWN per_triplet_loss, giving it a direct
+    incentive to DECREASE weight on high-loss (hard/camouflaged) triplets and INCREASE it on
+    low-loss (easy) ones -- exactly the opposite of what camo_weighted's hand-designed prior does,
+    and the textbook degenerate-collapse failure mode of naive (non-bi-level) learned example
+    reweighting (Ren et al. 2018, "Learning to Reweight Examples"). Shipped anyway per explicit
+    instruction to test empirically rather than reason it away in advance -- the run must be
+    checked for whether the learned weight ends up POSITIVELY correlated with dist_to_legit
+    (collapsed: up-weights obvious/easy fraud) or NEGATIVELY correlated (didn't collapse: still
+    up-weights camouflaged fraud like the hand-designed formula does), not just read off the
+    headline recovery number.
+
+    Two mitigations _camo_weighted_mlp_loss layers on top of the bare mechanism (both requested
+    directly, not things this MLP class enforces itself): (1) an EMA shadow copy is what actually
+    reweights the ENCODER's loss, not the raw live MLP -- see _update_ema -- so the encoder isn't
+    chasing a new, noisy scoring function every single epoch, the same non-stationarity concern
+    already on record for why Run 79's hard-triplet mining destabilized training; (2) a warmup
+    period where the encoder trains on plain unweighted triplet loss while the MLP trains quietly
+    in the background, so the EMA has already averaged over a less-random MLP before it ever
+    touches the encoder's gradient."""
+
+    def __init__(self, input_dim: int, hidden_dim: int = 32):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1),
+        )
+
+    def forward(self, features: torch.Tensor) -> torch.Tensor:
+        return self.net(features).squeeze(-1)
+
+
+def _update_ema(ema_module: "_CamoWeightMLP", live_module: "_CamoWeightMLP", decay: float) -> None:
+    """Polyak/EMA parameter update, called once per epoch (not per mini-batch step -- there are no
+    mini-batches in the full-batch training loop this is used from), so decay should be read as
+    an epoch-level smoothing constant, not the ~0.999 per-step values common in mini-batch-SGD
+    EMA/mean-teacher setups -- with only ~O(100-300) epochs total here, 0.999 would barely move at
+    all before training ends."""
+    with torch.no_grad():
+        for ema_p, live_p in zip(ema_module.parameters(), live_module.parameters()):
+            ema_p.mul_(decay).add_(live_p, alpha=1 - decay)
+
+
+def _camo_weighted_mlp_loss(embeddings: torch.Tensor, anchor_idx: torch.Tensor, pos_idx: torch.Tensor,
+                             neg_idx: torch.Tensor, legit_centroid: torch.Tensor, fraud_centroid: torch.Tensor,
+                             margin: float, weight_mlp: "_CamoWeightMLP", ema_weight_mlp: "_CamoWeightMLP",
+                             use_ema_weight: bool, anchor_weight_coeff: float = 0.1) -> tuple:
+    """camo_weighted_mlp mining: same triplet loss shape as _camo_weighted_loss, but the scoring
+    function deciding each anchor's importance weight is _CamoWeightMLP instead of a fixed
+    `-dist_to_legit` formula. The MLP's input is DETACHED (anchor embedding + both centroid
+    distances) so the main encoder can't receive a gradient through the weighting branch that
+    would let it "game" its own embedding position to win a favorable weight -- the only gradient
+    path back into embeddings is the ordinary per_triplet_loss term, same as every other variant
+    here.
+
+    Two SEPARATE loss terms, deliberately not one shared computation:
+    - `mlp_loss` uses the LIVE weight_mlp against per_triplet_loss.detach(), PLUS an anchor
+      regularizer pulling live_weight toward _camo_weighted_loss's own hand-designed
+      `softmax(-dist_to_legit)` weight. This is the only thing that ever updates weight_mlp's own
+      parameters, and it runs every epoch (even during warmup), so the EMA shadow already reflects
+      a partially-trained MLP once warmup ends. The anchor term exists because the bare
+      per_triplet_loss-driven signal has a KNOWN degenerate direction (down-weight high-loss/
+      camouflaged triplets -- the opposite of the domain prior); pulling toward the known-good
+      hand-designed weight makes that degenerate solution costly instead of free, while still
+      leaving the MLP room to use its richer features (embedding, dist_to_fraud) to deviate from
+      the pure-distance formula where that's actually informative. Not a hard constraint --
+      anchor_weight_coeff trades off "stay close to the trusted prior" against "learn something
+      the prior can't express"; 0 recovers the unconstrained (collapse-prone) version.
+    - `encoder_loss` uses the EMA-smoothed ema_weight_mlp (use_ema_weight=True, post-warmup) or
+      plain unweighted per_triplet_loss (use_ema_weight=False, warmup) -- this is what actually
+      reweights the ENCODER's gradient. ema_weight_mlp runs under no_grad, so this term can never
+      backprop into weight_mlp -- by construction the two objectives can't fight over the same
+      parameters in the same step.
+    Returns (loss, live_weight, ema_weight_or_None) for the caller's collapse-diagnostic logging."""
+    anchor = embeddings[anchor_idx]
+    pos = embeddings[pos_idx]
+    neg = embeddings[neg_idx]
+    d_pos = (anchor - pos).pow(2).sum(-1)
+    d_neg = (anchor - neg).pow(2).sum(-1)
+    per_triplet_loss = F.relu(d_pos - d_neg + margin)
+
+    dist_to_legit = (anchor - legit_centroid).pow(2).sum(-1).sqrt()
+    dist_to_fraud = (anchor - fraud_centroid).pow(2).sum(-1).sqrt()
+    mlp_input = torch.cat(
+        [anchor.detach(), dist_to_legit.detach().unsqueeze(-1), dist_to_fraud.detach().unsqueeze(-1)], dim=-1
+    )
+
+    live_logits = weight_mlp(mlp_input)
+    live_weight = torch.softmax(live_logits, dim=0) * len(live_logits)  # mean weight ~= 1, same convention throughout
+    with torch.no_grad():
+        anchor_weight = torch.softmax(-dist_to_legit, dim=0) * len(dist_to_legit)  # the hand-designed prior, fixed reference
+    anchor_reg = (live_weight - anchor_weight).pow(2).mean()
+    mlp_loss = (per_triplet_loss.detach() * live_weight).mean() + anchor_weight_coeff * anchor_reg
+
+    if use_ema_weight:
+        with torch.no_grad():
+            ema_logits = ema_weight_mlp(mlp_input)
+        ema_weight = torch.softmax(ema_logits, dim=0) * len(ema_logits)
+        encoder_loss = (per_triplet_loss * ema_weight).mean()
+    else:
+        encoder_loss = per_triplet_loss.mean()
+        ema_weight = None
+
+    loss = encoder_loss + mlp_loss
+    return loss, live_weight.detach(), (ema_weight.detach() if ema_weight is not None else None)
 
 
 def _centroid_scores(embeddings: torch.Tensor, fraud_centroid: torch.Tensor,
@@ -362,7 +480,9 @@ def _align_uniform_loss(embeddings: torch.Tensor, fraud_idx: torch.Tensor, legit
 def run(config: dict, n_triplets_per_epoch: int = 2000, margin: float = 1.0,
         compression_weight: float = 0.0, return_embeddings: bool = False, mining: str = "random",
         temperature: float = 0.1, align_weight: float = 1.0, uniform_weight: float = 1.0,
-        gate_aux_weight: float = 0.0, camo_temperature: float = 1.0, margin_scale: float = 1.0) -> dict:
+        gate_aux_weight: float = 0.0, camo_temperature: float = 1.0, margin_scale: float = 1.0,
+        camo_mlp_hidden_dim: int = 32, camo_mlp_ema_decay: float = 0.9,
+        camo_mlp_warmup_epochs: int = 40, camo_mlp_anchor_weight: float = 0.1) -> dict:
     wandb_run = init_wandb(config, "metric_learning")
     set_seed(config["seed"])
     device = pick_device(config["train"]["device"])
@@ -379,8 +499,25 @@ def run(config: dict, n_triplets_per_epoch: int = 2000, margin: float = 1.0,
         data.val_edge_index = data.val_edge_index.to(device)
 
     model = build_model(config, in_dim=data.x.shape[1]).to(device)
+    # Only instantiated for camo_weighted_mlp -- input_dim = hidden_dim (anchor embedding) + 2
+    # (dist_to_legit, dist_to_fraud). weight_mlp's parameters join the SAME optimizer as the main
+    # encoder so it trains jointly, end-to-end, off the main triplet objective (see
+    # _camo_weighted_mlp_loss). ema_weight_mlp is a Polyak-averaged shadow copy, never touched by
+    # the optimizer directly (updated only via _update_ema after each step) -- it's what actually
+    # reweights the encoder's loss, not the noisier live weight_mlp (see _CamoWeightMLP's docstring).
+    weight_mlp = ema_weight_mlp = None
+    if mining == "camo_weighted_mlp":
+        weight_mlp = _CamoWeightMLP(config["model"]["hidden_dim"] + 2, camo_mlp_hidden_dim).to(device)
+        ema_weight_mlp = _CamoWeightMLP(config["model"]["hidden_dim"] + 2, camo_mlp_hidden_dim).to(device)
+        for p in ema_weight_mlp.parameters():
+            p.requires_grad_(False)
+        # NOT seeded from weight_mlp's random init here -- seeded instead at the warmup boundary
+        # (see the training loop, "epoch == camo_mlp_warmup_epochs + 1"), from whatever weight_mlp
+        # has actually learned over the warmup epochs. Averaging in the near-random pre-warmup
+        # state would just be noise the EMA has to work its way back out of.
     optimizer = torch.optim.Adam(
-        model.parameters(), lr=config["train"]["lr"], weight_decay=config["train"]["weight_decay"],
+        list(model.parameters()) + (list(weight_mlp.parameters()) if weight_mlp is not None else []),
+        lr=config["train"]["lr"], weight_decay=config["train"]["weight_decay"],
     )
     triplet_loss_fn = torch.nn.TripletMarginLoss(margin=margin, p=2)
     generator = torch.Generator(device="cpu").manual_seed(config["seed"])
@@ -570,6 +707,40 @@ def run(config: dict, n_triplets_per_epoch: int = 2000, margin: float = 1.0,
                 legit_centroid_live = embeddings[train_legit_idx.to(device)].mean(dim=0)
                 loss = _camo_weighted_adaptive_margin_loss(embeddings, anchor_idx.to(device), pos_idx.to(device), neg_idx.to(device),
                                                             legit_centroid_live, margin, margin_scale=margin_scale)
+            elif mining == "camo_weighted_mlp":
+                anchor_idx, pos_idx, neg_idx = _sample_triplets(train_fraud_idx, train_legit_idx, n_triplets_per_epoch, generator)
+                legit_centroid_live = embeddings[train_legit_idx.to(device)].mean(dim=0)
+                fraud_centroid_live = embeddings[train_fraud_idx.to(device)].mean(dim=0)
+                use_ema_weight = epoch > camo_mlp_warmup_epochs
+                if epoch == camo_mlp_warmup_epochs + 1:
+                    # EMA starts tracking NOW, seeded from whatever weight_mlp has learned over the
+                    # warmup epochs -- not a decayed average that includes its near-random epoch-1 state.
+                    ema_weight_mlp.load_state_dict(weight_mlp.state_dict())
+                    logger.info(f"epoch {epoch}: seeding ema_weight_mlp from live weight_mlp, EMA weighting begins")
+                loss, live_weight, ema_weight_used = _camo_weighted_mlp_loss(
+                    embeddings, anchor_idx.to(device), pos_idx.to(device), neg_idx.to(device),
+                    legit_centroid_live, fraud_centroid_live, margin, weight_mlp, ema_weight_mlp, use_ema_weight,
+                    anchor_weight_coeff=camo_mlp_anchor_weight)
+                if epoch % 25 == 0 or epoch == 1:
+                    # Diagnostic for the collapse risk flagged in _CamoWeightMLP's docstring: does
+                    # the learned weight end up negatively correlated with dist_to_legit (still
+                    # up-weighting camouflaged anchors, like the hand-designed formula) or
+                    # positively (collapsed to up-weighting easy/obvious ones instead)? Checked on
+                    # the live weight always (it's training from epoch 1 regardless of warmup) and
+                    # on the EMA weight once it's actually in use.
+                    dist_to_legit_live = (embeddings[anchor_idx.to(device)] - legit_centroid_live).pow(2).sum(-1).sqrt()
+                    live_corr = torch.corrcoef(torch.stack([live_weight, dist_to_legit_live]))[0, 1].item()
+                    log_line = f"epoch {epoch} camo_weighted_mlp: live weight-vs-dist_to_legit corr={live_corr:.4f}"
+                    wandb_payload = {"camo_mlp_live_weight_dist_corr": live_corr}
+                    if ema_weight_used is not None:
+                        ema_corr = torch.corrcoef(torch.stack([ema_weight_used, dist_to_legit_live]))[0, 1].item()
+                        log_line += f" ema corr={ema_corr:.4f} (this is what's actually reweighting the encoder)"
+                        wandb_payload["camo_mlp_ema_weight_dist_corr"] = ema_corr
+                    else:
+                        log_line += " (warmup: encoder still on plain unweighted loss)"
+                    log_line += " -- negative=up-weights camo like the hand-designed formula, positive=collapsed"
+                    logger.info(log_line)
+                    wandb.log(wandb_payload, step=epoch)
             elif mining == "semi_hard":
                 anchor_emb, pos_emb, neg_emb = _semi_hard_triplets(embeddings, train_fraud_idx.to(device), train_legit_idx.to(device),
                                                                      n_triplets_per_epoch, generator)
@@ -594,7 +765,7 @@ def run(config: dict, n_triplets_per_epoch: int = 2000, margin: float = 1.0,
             else:
                 raise ValueError(f"Unknown mining: {mining!r} (expected 'random', 'hard', 'camo_weighted', "
                                   f"'camo_weighted_temp', 'camo_weighted_dual', 'camo_weighted_margin_scale', "
-                                  f"'semi_hard', 'multi_prototype', 'supcon', or 'align_uniform')")
+                                  f"'camo_weighted_mlp', 'semi_hard', 'multi_prototype', 'supcon', or 'align_uniform')")
             if compression_weight > 0:
                 comp_loss = _compression_loss(embeddings, train_fraud_idx.to(device), train_legit_idx.to(device))
                 loss = loss + compression_weight * comp_loss
@@ -615,6 +786,10 @@ def run(config: dict, n_triplets_per_epoch: int = 2000, margin: float = 1.0,
                     loss = loss + gate_aux_weight * gate_loss
             loss.backward()
             optimizer.step()
+            if mining == "camo_weighted_mlp" and epoch > camo_mlp_warmup_epochs + 1:
+                # epoch == warmup+1 itself already seeded ema_weight_mlp directly above (exact
+                # copy, decay update there would be a no-op anyway since ema==live at that instant)
+                _update_ema(ema_weight_mlp, weight_mlp, camo_mlp_ema_decay)
 
             model.eval()
             with torch.no_grad():

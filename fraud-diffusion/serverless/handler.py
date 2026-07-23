@@ -139,7 +139,11 @@ def handler(job):
                                           uniform_weight=mcfg.get("uniform_weight", 1.0),
                                           gate_aux_weight=mcfg.get("gate_aux_weight", 0.0),
                                           camo_temperature=mcfg.get("camo_temperature", 1.0),
-                                          margin_scale=mcfg.get("margin_scale", 1.0))
+                                          margin_scale=mcfg.get("margin_scale", 1.0),
+                                          camo_mlp_hidden_dim=mcfg.get("camo_mlp_hidden_dim", 32),
+                                          camo_mlp_ema_decay=mcfg.get("camo_mlp_ema_decay", 0.9),
+                                          camo_mlp_warmup_epochs=mcfg.get("camo_mlp_warmup_epochs", 40),
+                                          camo_mlp_anchor_weight=mcfg.get("camo_mlp_anchor_weight", 0.1))
         elif config.get("gnn_rnn", {}).get("enabled"):
             # GraphSAGEDiff (card1/addr1-sharing edges) + GRU (each transaction's own entity's
             # prior transactions, in time order) -- see evaluation/gnn_rnn_hybrid.py.

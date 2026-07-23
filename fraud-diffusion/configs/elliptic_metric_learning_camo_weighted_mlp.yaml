@@ -1,0 +1,50 @@
+seed: 42
+
+data:
+  dataset: elliptic
+  raw_dir: data/raw/elliptic/elliptic_bitcoin_dataset
+  processed_path: data/processed/elliptic_graph.pt
+  train_end_step: 34
+  val_end_step: 41
+
+# camo_weighted_mlp (2026-07-23): replaces camo_weighted's hand-designed
+# softmax(-dist_to_legit) scoring function with a small learned MLP -- input is the anchor's own
+# embedding + dist_to_legit + dist_to_fraud (richer than the single scalar the hand-designed
+# formula uses). Three stability mitigations on top of the bare mechanism: (1) a 40-epoch warmup
+# where the encoder trains on plain unweighted triplet loss while the MLP trains quietly in the
+# background; (2) after warmup, ema_weight_mlp is SEEDED from the live MLP's just-warmed-up state
+# (not carried from random init) and from then on the encoder's loss is reweighted by this
+# EMA-smoothed shadow copy (decay=0.9/epoch), not the raw live one, so the encoder isn't chasing a
+# new scoring function every single epoch; (3) an anchor regularizer (weight 0.1) pulling the
+# live MLP's output toward the hand-designed formula's own weight, making the known degenerate
+# direction (down-weight camouflaged triplets) costly instead of free while still letting the MLP
+# use its richer features to deviate where informative. KNOWN, not fully eliminated, only
+# mitigated: check camo_mlp_ema_weight_dist_corr in wandb/logs -- negative = didn't collapse
+# (still up-weights camo, like the hand-designed prior), positive = collapsed toward easy fraud.
+# Tested on plain graphsage_diff first (not dual_view_encoded) to isolate the loss mechanism's own
+# effect, same precedent as camo_weighted_temp/dual/margin_scale's first tests.
+model:
+  name: graphsage_diff
+  hidden_dim: 128
+  num_layers: 2
+  dropout: 0.5
+
+train:
+  lr: 0.001
+  weight_decay: 0.00001
+  epochs: 1000
+  patience: 50
+  device: auto
+
+metric_learning:
+  enabled: true
+  margin: 1.0
+  mining: camo_weighted_mlp
+  camo_mlp_hidden_dim: 32
+  camo_mlp_ema_decay: 0.9
+  camo_mlp_warmup_epochs: 40
+  camo_mlp_anchor_weight: 0.1
+
+journal:
+  path: LAB_JOURNAL.md
+  run_name: elliptic_metric_learning_camo_weighted_mlp
