@@ -11,11 +11,33 @@ import torch
 import torch.nn.functional as F
 import wandb
 import yaml
+from sklearn.mixture import GaussianMixture
 
 from models.diffusion.tabddpm import Discriminator, GaussianDiffusion, TabDDPMDenoiser
 
 ROOT = Path(__file__).resolve().parent.parent
 logger = logging.getLogger(__name__)
+
+
+def _select_archetype(fraud_features: torch.Tensor, legit_centroid: torch.Tensor, archetype: str) -> torch.Tensor:
+    """Boolean mask into fraud_features selecting the "camouflaged" or "obvious" sub-archetype
+    (Run 81/82's 2-component GMM split on distance-to-legit-centroid), or everything ("all",
+    preserving the original unconditional-generator behavior). Runs on RAW features specifically
+    -- unlike evaluation/metric_learning.py's _fraud_prototypes (live embeddings, refit every
+    epoch), this has to work BEFORE any GNN training exists, so it's a one-time fit on the same
+    raw feature space TabDDPM itself trains on. The camouflaged component is whichever of the two
+    GMM components has the SMALLER mean distance to legit (closer to legit = more camouflaged,
+    same convention as every other camouflage measurement in this project)."""
+    if archetype == "all":
+        return torch.ones(fraud_features.shape[0], dtype=torch.bool)
+    dist = (fraud_features - legit_centroid).pow(2).sum(-1).sqrt().cpu().numpy()
+    gmm = GaussianMixture(n_components=2, random_state=0, n_init=10).fit(dist.reshape(-1, 1))
+    labels = gmm.predict(dist.reshape(-1, 1))
+    # component with the SMALLER mean distance-to-legit is "camouflaged" (closer to legit)
+    camouflaged_component = int(gmm.means_.flatten().argmin())
+    is_camouflaged = labels == camouflaged_component
+    mask = is_camouflaged if archetype == "camouflaged" else ~is_camouflaged
+    return torch.from_numpy(mask)
 
 
 def init_wandb(config: dict):
@@ -81,6 +103,15 @@ def run_from_config(config: dict) -> Path:
     # information into the generator that later augments the training set.
     fraud_mask = data.train_mask & (data.y == 1)
     fraud_features = data.x[fraud_mask].to(device)
+
+    archetype = dcfg.get("archetype", "all")
+    if archetype != "all":
+        legit_centroid = data.x[data.train_mask & (data.y == 0)].mean(dim=0).to(device)
+        archetype_mask = _select_archetype(fraud_features, legit_centroid, archetype).to(device)
+        fraud_features = fraud_features[archetype_mask]
+        logger.info(f"diffusion.archetype={archetype!r}: restricted to {fraud_features.shape[0]} "
+                    f"of {archetype_mask.numel()} train-fraud feature vectors")
+
     logger.info(f"Training diffusion model on {fraud_features.shape[0]} fraud node feature vectors "
                 f"(dim={fraud_features.shape[1]}) from the TRAIN split")
 
