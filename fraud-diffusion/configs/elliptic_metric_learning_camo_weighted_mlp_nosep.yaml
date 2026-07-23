@@ -1,0 +1,40 @@
+seed: 42
+
+data:
+  dataset: elliptic
+  raw_dir: data/raw/elliptic/elliptic_bitcoin_dataset
+  processed_path: data/processed/elliptic_graph.pt
+  train_end_step: 34
+  val_end_step: 41
+
+# Ablation of elliptic_metric_learning_camo_weighted_mlp.yaml: camo_weighted_mlp WITHOUT the
+# centroid-separation term (separation_weight=0.0, everything else identical). Bundling both new
+# mechanisms into one config would leave any effect uninterpretable -- this isolates the learned
+# MLP weighting mechanism's OWN effect, independent of the separation loss.
+model:
+  name: graphsage_diff
+  hidden_dim: 128
+  num_layers: 2
+  dropout: 0.5
+
+train:
+  lr: 0.001
+  weight_decay: 0.00001
+  epochs: 1000
+  patience: 50
+  device: auto
+
+metric_learning:
+  enabled: true
+  margin: 1.0
+  mining: camo_weighted_mlp
+  camo_mlp_hidden_dim: 32
+  camo_mlp_ema_decay: 0.9
+  camo_mlp_warmup_epochs: 40
+  camo_mlp_anchor_weight: 2.0
+  camo_mlp_subcentroid_k: 15
+  separation_weight: 0.0
+
+journal:
+  path: LAB_JOURNAL.md
+  run_name: elliptic_metric_learning_camo_weighted_mlp_nosep

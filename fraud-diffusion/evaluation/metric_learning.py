@@ -29,6 +29,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import wandb
+from sklearn.cluster import KMeans
 from sklearn.mixture import GaussianMixture
 from torch_geometric.loader import NeighborLoader
 
@@ -238,7 +239,8 @@ def _update_ema(ema_module: "_CamoWeightMLP", live_module: "_CamoWeightMLP", dec
 def _camo_weighted_mlp_loss(embeddings: torch.Tensor, anchor_idx: torch.Tensor, pos_idx: torch.Tensor,
                              neg_idx: torch.Tensor, legit_centroid: torch.Tensor, fraud_centroid: torch.Tensor,
                              margin: float, weight_mlp: "_CamoWeightMLP", ema_weight_mlp: "_CamoWeightMLP",
-                             use_ema_weight: bool, anchor_weight_coeff: float = 0.1) -> tuple:
+                             use_ema_weight: bool, anchor_weight_coeff: float = 0.1,
+                             subcentroid_dist: torch.Tensor = None) -> tuple:
     """camo_weighted_mlp mining: same triplet loss shape as _camo_weighted_loss, but the scoring
     function deciding each anchor's importance weight is _CamoWeightMLP instead of a fixed
     `-dist_to_legit` formula. The MLP's input is DETACHED (anchor embedding + both centroid
@@ -275,9 +277,10 @@ def _camo_weighted_mlp_loss(embeddings: torch.Tensor, anchor_idx: torch.Tensor, 
 
     dist_to_legit = (anchor - legit_centroid).pow(2).sum(-1).sqrt()
     dist_to_fraud = (anchor - fraud_centroid).pow(2).sum(-1).sqrt()
-    mlp_input = torch.cat(
-        [anchor.detach(), dist_to_legit.detach().unsqueeze(-1), dist_to_fraud.detach().unsqueeze(-1)], dim=-1
-    )
+    mlp_input_parts = [anchor.detach(), dist_to_legit.detach().unsqueeze(-1), dist_to_fraud.detach().unsqueeze(-1)]
+    if subcentroid_dist is not None:
+        mlp_input_parts.append(subcentroid_dist.detach().unsqueeze(-1))
+    mlp_input = torch.cat(mlp_input_parts, dim=-1)
 
     live_logits = weight_mlp(mlp_input)
     live_weight = torch.softmax(live_logits, dim=0) * len(live_logits)  # mean weight ~= 1, same convention throughout
@@ -398,6 +401,22 @@ def _fraud_prototypes(fraud_emb: torch.Tensor, legit_centroid: torch.Tensor) -> 
     return centroid_0, centroid_1, labels
 
 
+def _nearest_subcentroid_distance(anchor_emb: torch.Tensor, legit_emb: torch.Tensor, n_clusters: int) -> torch.Tensor:
+    """Distance from each anchor to the NEAREST of many small legit sub-centroids (KMeans, refit
+    fresh from the CURRENT legit embeddings every call -- same "recompute live, not once" spirit as
+    _fraud_prototypes' GMM), as a richer, more local alternative to distance from the single
+    aggregate legit centroid the hand-designed formula uses. Run 160 already found nearest-of-K-
+    legit-centroids fails as a STANDALONE decision rule (0/6 seed wins vs. plain single-centroid
+    distance) -- legit isn't well-summarized by one centroid, but this distance may still carry
+    usable information as ONE feature among several for a learned function to combine, even where
+    it wasn't sufficient alone as the entire decision rule."""
+    legit_np = legit_emb.detach().cpu().numpy()
+    n_clusters_eff = min(n_clusters, len(legit_np))
+    kmeans = KMeans(n_clusters=n_clusters_eff, n_init=1, max_iter=20, random_state=0).fit(legit_np)
+    centroids = torch.from_numpy(kmeans.cluster_centers_).to(anchor_emb.device).to(anchor_emb.dtype)
+    return torch.cdist(anchor_emb.detach(), centroids).min(dim=1).values
+
+
 def _sample_multi_prototype_triplets(fraud_idx: torch.Tensor, legit_idx: torch.Tensor, sub_labels: torch.Tensor,
                                       n_triplets: int, generator: torch.Generator) -> tuple:
     """Like _sample_triplets, but the positive is drawn from the SAME GMM sub-cluster as the
@@ -500,7 +519,7 @@ def run(config: dict, n_triplets_per_epoch: int = 2000, margin: float = 1.0,
         gate_aux_weight: float = 0.0, camo_temperature: float = 1.0, margin_scale: float = 1.0,
         camo_mlp_hidden_dim: int = 32, camo_mlp_ema_decay: float = 0.9,
         camo_mlp_warmup_epochs: int = 40, camo_mlp_anchor_weight: float = 0.1,
-        separation_weight: float = 0.0) -> dict:
+        separation_weight: float = 0.0, camo_mlp_subcentroid_k: int = 0) -> dict:
     wandb_run = init_wandb(config, "metric_learning")
     set_seed(config["seed"])
     device = pick_device(config["train"]["device"])
@@ -518,15 +537,17 @@ def run(config: dict, n_triplets_per_epoch: int = 2000, margin: float = 1.0,
 
     model = build_model(config, in_dim=data.x.shape[1]).to(device)
     # Only instantiated for camo_weighted_mlp -- input_dim = hidden_dim (anchor embedding) + 2
-    # (dist_to_legit, dist_to_fraud). weight_mlp's parameters join the SAME optimizer as the main
-    # encoder so it trains jointly, end-to-end, off the main triplet objective (see
-    # _camo_weighted_mlp_loss). ema_weight_mlp is a Polyak-averaged shadow copy, never touched by
-    # the optimizer directly (updated only via _update_ema after each step) -- it's what actually
-    # reweights the encoder's loss, not the noisier live weight_mlp (see _CamoWeightMLP's docstring).
+    # (dist_to_legit, dist_to_fraud) + 1 more if camo_mlp_subcentroid_k>0 (nearest-legit-sub-
+    # centroid distance). weight_mlp's parameters join the SAME optimizer as the main encoder so it
+    # trains jointly, end-to-end, off the main triplet objective (see _camo_weighted_mlp_loss).
+    # ema_weight_mlp is a Polyak-averaged shadow copy, never touched by the optimizer directly
+    # (updated only via _update_ema after each step) -- it's what actually reweights the encoder's
+    # loss, not the noisier live weight_mlp (see _CamoWeightMLP's docstring).
     weight_mlp = ema_weight_mlp = None
     if mining == "camo_weighted_mlp":
-        weight_mlp = _CamoWeightMLP(config["model"]["hidden_dim"] + 2, camo_mlp_hidden_dim).to(device)
-        ema_weight_mlp = _CamoWeightMLP(config["model"]["hidden_dim"] + 2, camo_mlp_hidden_dim).to(device)
+        camo_mlp_input_dim = config["model"]["hidden_dim"] + 2 + (1 if camo_mlp_subcentroid_k > 0 else 0)
+        weight_mlp = _CamoWeightMLP(camo_mlp_input_dim, camo_mlp_hidden_dim).to(device)
+        ema_weight_mlp = _CamoWeightMLP(camo_mlp_input_dim, camo_mlp_hidden_dim).to(device)
         for p in ema_weight_mlp.parameters():
             p.requires_grad_(False)
         # NOT seeded from weight_mlp's random init here -- seeded instead at the warmup boundary
@@ -741,10 +762,14 @@ def run(config: dict, n_triplets_per_epoch: int = 2000, margin: float = 1.0,
                     # warmup epochs -- not a decayed average that includes its near-random epoch-1 state.
                     ema_weight_mlp.load_state_dict(weight_mlp.state_dict())
                     logger.info(f"epoch {epoch}: seeding ema_weight_mlp from live weight_mlp, EMA weighting begins")
+                subcentroid_dist_anchor = None
+                if camo_mlp_subcentroid_k > 0:
+                    subcentroid_dist_anchor = _nearest_subcentroid_distance(
+                        embeddings[anchor_idx.to(device)], embeddings[train_legit_idx.to(device)], camo_mlp_subcentroid_k)
                 loss, live_weight, ema_weight_used = _camo_weighted_mlp_loss(
                     embeddings, anchor_idx.to(device), pos_idx.to(device), neg_idx.to(device),
                     legit_centroid_live, fraud_centroid_live, margin, weight_mlp, ema_weight_mlp, use_ema_weight,
-                    anchor_weight_coeff=camo_mlp_anchor_weight)
+                    anchor_weight_coeff=camo_mlp_anchor_weight, subcentroid_dist=subcentroid_dist_anchor)
                 if epoch % 25 == 0 or epoch == 1:
                     # Diagnostic for the collapse risk flagged in _CamoWeightMLP's docstring: does
                     # the learned weight end up negatively correlated with dist_to_legit (still

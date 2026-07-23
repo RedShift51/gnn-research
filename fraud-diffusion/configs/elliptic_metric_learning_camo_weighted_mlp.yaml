@@ -9,20 +9,23 @@ data:
 
 # camo_weighted_mlp (2026-07-23): replaces camo_weighted's hand-designed
 # softmax(-dist_to_legit) scoring function with a small learned MLP -- input is the anchor's own
-# embedding + dist_to_legit + dist_to_fraud (richer than the single scalar the hand-designed
-# formula uses). Three stability mitigations on top of the bare mechanism: (1) a 40-epoch warmup
-# where the encoder trains on plain unweighted triplet loss while the MLP trains quietly in the
-# background; (2) after warmup, ema_weight_mlp is SEEDED from the live MLP's just-warmed-up state
-# (not carried from random init) and from then on the encoder's loss is reweighted by this
-# EMA-smoothed shadow copy (decay=0.9/epoch), not the raw live one, so the encoder isn't chasing a
-# new scoring function every single epoch; (3) an anchor regularizer (weight 0.1) pulling the
-# live MLP's output toward the hand-designed formula's own weight, making the known degenerate
-# direction (down-weight camouflaged triplets) costly instead of free while still letting the MLP
-# use its richer features to deviate where informative. KNOWN, not fully eliminated, only
-# mitigated: check camo_mlp_ema_weight_dist_corr in wandb/logs -- negative = didn't collapse
-# (still up-weights camo, like the hand-designed prior), positive = collapsed toward easy fraud.
-# Tested on plain graphsage_diff first (not dual_view_encoded) to isolate the loss mechanism's own
-# effect, same precedent as camo_weighted_temp/dual/margin_scale's first tests.
+# embedding + dist_to_legit + dist_to_fraud + nearest-legit-subcentroid-distance (KMeans over
+# CURRENT legit embeddings, richer/more local than the single aggregate legit centroid -- Run 160
+# found this fails as a STANDALONE decision rule, but may still help as one feature among several).
+# Three stability mitigations on top of the bare mechanism: (1) a 40-epoch warmup where the encoder
+# trains on plain unweighted triplet loss while the MLP trains quietly in the background; (2)
+# after warmup, ema_weight_mlp is SEEDED from the live MLP's just-warmed-up state (not carried from
+# random init) and from then on the encoder's loss is reweighted by this EMA-smoothed shadow copy
+# (decay=0.9/epoch), not the raw live one; (3) an anchor regularizer pulling the live MLP's output
+# toward the hand-designed formula's own weight.
+#
+# CORRECTED 2026-07-23 after a first dispatch (anchor weight=0.1): the collapse happened anyway --
+# both live and EMA weight-vs-dist_to_legit correlation shot to +0.91 to +0.98 by epoch 25 and
+# stayed there (POSITIVE = up-weighting easy/obvious fraud, the exact predicted degenerate
+# direction). anchor_weight_coeff=0.1 was far too weak relative to the main per_triplet_loss-driven
+# term (same order of magnitude as the loss itself, ~1-4, vs. a squared-weight-difference penalty
+# an order of magnitude smaller). Bumped to 2.0 here -- re-verify the correlation diagnostic
+# BEFORE trusting any recovery number, same as before.
 model:
   name: graphsage_diff
   hidden_dim: 128
@@ -43,7 +46,8 @@ metric_learning:
   camo_mlp_hidden_dim: 32
   camo_mlp_ema_decay: 0.9
   camo_mlp_warmup_epochs: 40
-  camo_mlp_anchor_weight: 0.1
+  camo_mlp_anchor_weight: 2.0
+  camo_mlp_subcentroid_k: 15
   # Explicit push for the fraud/legit centroids to separate further -- the margin-based triplet
   # loss saturates (F.relu(...)=0) once satisfied and stops rewarding extra separation; this has
   # no such ceiling. Untested weight -- 0.1 is a starting guess (loss magnitudes are roughly the

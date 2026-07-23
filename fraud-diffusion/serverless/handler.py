@@ -144,7 +144,8 @@ def handler(job):
                                           camo_mlp_ema_decay=mcfg.get("camo_mlp_ema_decay", 0.9),
                                           camo_mlp_warmup_epochs=mcfg.get("camo_mlp_warmup_epochs", 40),
                                           camo_mlp_anchor_weight=mcfg.get("camo_mlp_anchor_weight", 0.1),
-                                          separation_weight=mcfg.get("separation_weight", 0.0))
+                                          separation_weight=mcfg.get("separation_weight", 0.0),
+                                          camo_mlp_subcentroid_k=mcfg.get("camo_mlp_subcentroid_k", 0))
         elif config.get("gnn_rnn", {}).get("enabled"):
             # GraphSAGEDiff (card1/addr1-sharing edges) + GRU (each transaction's own entity's
             # prior transactions, in time order) -- see evaluation/gnn_rnn_hybrid.py.
