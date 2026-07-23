@@ -662,6 +662,12 @@ def run(config: dict, n_triplets_per_epoch: int = 2000, margin: float = 1.0,
         if hasattr(model, "set_legit_centroid"):
             model.set_legit_centroid(data.x, train_legit_idx.to(device))
 
+        # Collected only for mining=="camo_weighted_mlp" -- the collapse-diagnostic correlations
+        # are otherwise only logger.info'd, which never reaches the caller through RunPod's
+        # job-output path (only the return value below does), so a real dispatch would have no
+        # way to check them without this.
+        camo_mlp_diagnostics = []
+
         for epoch in range(1, config["train"]["epochs"] + 1):
             model.train()
             optimizer.zero_grad()
@@ -732,6 +738,7 @@ def run(config: dict, n_triplets_per_epoch: int = 2000, margin: float = 1.0,
                     live_corr = torch.corrcoef(torch.stack([live_weight, dist_to_legit_live]))[0, 1].item()
                     log_line = f"epoch {epoch} camo_weighted_mlp: live weight-vs-dist_to_legit corr={live_corr:.4f}"
                     wandb_payload = {"camo_mlp_live_weight_dist_corr": live_corr}
+                    ema_corr = None
                     if ema_weight_used is not None:
                         ema_corr = torch.corrcoef(torch.stack([ema_weight_used, dist_to_legit_live]))[0, 1].item()
                         log_line += f" ema corr={ema_corr:.4f} (this is what's actually reweighting the encoder)"
@@ -741,6 +748,8 @@ def run(config: dict, n_triplets_per_epoch: int = 2000, margin: float = 1.0,
                     log_line += " -- negative=up-weights camo like the hand-designed formula, positive=collapsed"
                     logger.info(log_line)
                     wandb.log(wandb_payload, step=epoch)
+                    camo_mlp_diagnostics.append({"epoch": epoch, "live_corr": round(live_corr, 4),
+                                                  "ema_corr": round(ema_corr, 4) if ema_corr is not None else None})
             elif mining == "semi_hard":
                 anchor_emb, pos_emb, neg_emb = _semi_hard_triplets(embeddings, train_fraud_idx.to(device), train_legit_idx.to(device),
                                                                      n_triplets_per_epoch, generator)
@@ -883,6 +892,8 @@ def run(config: dict, n_triplets_per_epoch: int = 2000, margin: float = 1.0,
         "legit_spread_mean": float(legit_spread.mean()), "legit_spread_std": float(legit_spread.std()),
         "train_fraud_dist_to_legit": np.round(train_fraud_dist_to_legit, 5).tolist(),
     }
+    if mining == "camo_weighted_mlp":
+        result["camo_mlp_diagnostics"] = camo_mlp_diagnostics
     if return_embeddings:
         # Off by default -- only needed for the embedding-dimension / linear-probe analysis
         # (2026-07-21 discussion), which doesn't need retraining once these are captured.
