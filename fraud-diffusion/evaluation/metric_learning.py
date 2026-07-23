@@ -236,6 +236,25 @@ def _update_ema(ema_module: "_CamoWeightMLP", live_module: "_CamoWeightMLP", dec
             ema_p.mul_(decay).add_(live_p, alpha=1 - decay)
 
 
+def _adaptive_anchor_weight(current: float, live_corr: float, base: float, max_weight: float = 10.0,
+                             growth: float = 1.15, decay: float = 0.98, safe_threshold: float = -0.3) -> float:
+    """Feedback controller replacing a single guessed-a-priori anchor_weight_coeff (Run 167: 0.1
+    and 0.5 both collapsed -- POSITIVE live-weight-vs-dist_to_legit correlation -- and only 2.0
+    avoided it, at the cost of pinning the MLP so close to the hand-designed formula it couldn't
+    add anything). Tightens the anchor pull automatically whenever the live correlation drifts
+    toward collapse (positive = wrong direction) and relaxes it back toward `base` once safely
+    negative -- a self-correcting gate driven by the collapse diagnostic itself, not a naively-
+    learned one (a learned gate trained on the same reweighted-loss objective would inherit the
+    identical degenerate incentive the anchor term exists to counteract). One-epoch-lagged by
+    construction: this epoch's `live_corr` sets NEXT epoch's coefficient, avoiding the circular
+    dependency of needing the coefficient to compute the very forward pass that produces it."""
+    if live_corr > 0:
+        return min(current * growth, max_weight)
+    elif live_corr < safe_threshold:
+        return max(current * decay, base)
+    return current
+
+
 def _camo_weighted_mlp_loss(embeddings: torch.Tensor, anchor_idx: torch.Tensor, pos_idx: torch.Tensor,
                              neg_idx: torch.Tensor, legit_centroid: torch.Tensor, fraud_centroid: torch.Tensor,
                              margin: float, weight_mlp: "_CamoWeightMLP", ema_weight_mlp: "_CamoWeightMLP",
@@ -563,7 +582,7 @@ def run(config: dict, n_triplets_per_epoch: int = 2000, margin: float = 1.0,
         camo_mlp_hidden_dim: int = 32, camo_mlp_ema_decay: float = 0.9,
         camo_mlp_warmup_epochs: int = 40, camo_mlp_anchor_weight: float = 0.1,
         separation_weight: float = 0.0, camo_mlp_subcentroid_k: int = 0,
-        mlp_separation_weight: float = 0.0) -> dict:
+        mlp_separation_weight: float = 0.0, camo_mlp_anchor_adaptive: bool = False) -> dict:
     wandb_run = init_wandb(config, "metric_learning")
     set_seed(config["seed"])
     device = pick_device(config["train"]["device"])
@@ -753,6 +772,9 @@ def run(config: dict, n_triplets_per_epoch: int = 2000, margin: float = 1.0,
         # job-output path (only the return value below does), so a real dispatch would have no
         # way to check them without this.
         camo_mlp_diagnostics = []
+        # Mutable, one-epoch-lagged feedback state for _adaptive_anchor_weight -- only advances when
+        # camo_mlp_anchor_adaptive=True; otherwise stays fixed at the configured camo_mlp_anchor_weight.
+        current_anchor_weight = camo_mlp_anchor_weight
 
         for epoch in range(1, config["train"]["epochs"] + 1):
             model.train()
@@ -816,7 +838,14 @@ def run(config: dict, n_triplets_per_epoch: int = 2000, margin: float = 1.0,
                 loss, live_weight, ema_weight_used = _camo_weighted_mlp_loss(
                     embeddings, anchor_idx.to(device), pos_idx.to(device), neg_idx.to(device),
                     legit_centroid_live, fraud_centroid_live, margin, weight_mlp, ema_weight_mlp, use_ema_weight,
-                    anchor_weight_coeff=camo_mlp_anchor_weight, subcentroid_dist=subcentroid_dist_anchor)
+                    anchor_weight_coeff=current_anchor_weight, subcentroid_dist=subcentroid_dist_anchor)
+                # Computed EVERY epoch (not just when logging) -- camo_mlp_anchor_adaptive needs
+                # this epoch's correlation to set NEXT epoch's current_anchor_weight, one-epoch-
+                # lagged (see _adaptive_anchor_weight's docstring for why lagged, not circular).
+                dist_to_legit_live = (embeddings[anchor_idx.to(device)] - legit_centroid_live).pow(2).sum(-1).sqrt()
+                live_corr = torch.corrcoef(torch.stack([live_weight, dist_to_legit_live]))[0, 1].item()
+                if camo_mlp_anchor_adaptive:
+                    current_anchor_weight = _adaptive_anchor_weight(current_anchor_weight, live_corr, base=camo_mlp_anchor_weight)
                 if epoch % 25 == 0 or epoch == 1:
                     # Diagnostic for the collapse risk flagged in _CamoWeightMLP's docstring: does
                     # the learned weight end up negatively correlated with dist_to_legit (still
@@ -824,10 +853,9 @@ def run(config: dict, n_triplets_per_epoch: int = 2000, margin: float = 1.0,
                     # positively (collapsed to up-weighting easy/obvious ones instead)? Checked on
                     # the live weight always (it's training from epoch 1 regardless of warmup) and
                     # on the EMA weight once it's actually in use.
-                    dist_to_legit_live = (embeddings[anchor_idx.to(device)] - legit_centroid_live).pow(2).sum(-1).sqrt()
-                    live_corr = torch.corrcoef(torch.stack([live_weight, dist_to_legit_live]))[0, 1].item()
-                    log_line = f"epoch {epoch} camo_weighted_mlp: live weight-vs-dist_to_legit corr={live_corr:.4f}"
-                    wandb_payload = {"camo_mlp_live_weight_dist_corr": live_corr}
+                    log_line = (f"epoch {epoch} camo_weighted_mlp: live weight-vs-dist_to_legit corr={live_corr:.4f} "
+                                f"anchor_weight={current_anchor_weight:.4f}")
+                    wandb_payload = {"camo_mlp_live_weight_dist_corr": live_corr, "camo_mlp_anchor_weight": current_anchor_weight}
                     ema_corr = None
                     if ema_weight_used is not None:
                         ema_corr = torch.corrcoef(torch.stack([ema_weight_used, dist_to_legit_live]))[0, 1].item()
@@ -839,7 +867,8 @@ def run(config: dict, n_triplets_per_epoch: int = 2000, margin: float = 1.0,
                     logger.info(log_line)
                     wandb.log(wandb_payload, step=epoch)
                     camo_mlp_diagnostics.append({"epoch": epoch, "live_corr": round(live_corr, 4),
-                                                  "ema_corr": round(ema_corr, 4) if ema_corr is not None else None})
+                                                  "ema_corr": round(ema_corr, 4) if ema_corr is not None else None,
+                                                  "anchor_weight": round(current_anchor_weight, 4)})
             elif mining == "semi_hard":
                 anchor_emb, pos_emb, neg_emb = _semi_hard_triplets(embeddings, train_fraud_idx.to(device), train_legit_idx.to(device),
                                                                      n_triplets_per_epoch, generator)

@@ -1,0 +1,47 @@
+seed: 42
+
+data:
+  dataset: elliptic
+  raw_dir: data/raw/elliptic/elliptic_bitcoin_dataset
+  processed_path: data/processed/elliptic_graph.pt
+  train_end_step: 34
+  val_end_step: 41
+
+# Run 167 found anchor_weight=0.5 (promoted for its F1 gain) is ALSO collapsed (corr +0.80 to
+# +0.99, same wrong direction as anchor=0.1) -- neither 0.1 nor 0.5 actually prevent it, only 2.0
+# did, at the cost of pinning the MLP so close to the hand-designed formula it adds nothing.
+# camo_mlp_anchor_adaptive replaces the single guessed constant with a feedback controller
+# (_adaptive_anchor_weight): starts at camo_mlp_anchor_weight (the FLOOR, not a fixed value), grows
+# automatically whenever the live weight-vs-dist_to_legit correlation drifts positive (toward
+# collapse), and relaxes back toward the floor once safely negative. One-epoch-lagged (this
+# epoch's correlation sets next epoch's coefficient) -- a self-correcting gate driven by the
+# collapse diagnostic itself, not a naively end-to-end learned one (which would inherit the same
+# degenerate incentive the anchor term exists to counteract).
+model:
+  name: graphsage_diff
+  hidden_dim: 128
+  num_layers: 2
+  dropout: 0.5
+
+train:
+  lr: 0.001
+  weight_decay: 0.00001
+  epochs: 1000
+  patience: 50
+  device: auto
+
+metric_learning:
+  enabled: true
+  margin: 1.0
+  mining: camo_weighted_mlp
+  camo_mlp_hidden_dim: 32
+  camo_mlp_ema_decay: 0.9
+  camo_mlp_warmup_epochs: 40
+  camo_mlp_anchor_weight: 0.3
+  camo_mlp_anchor_adaptive: true
+  camo_mlp_subcentroid_k: 15
+  separation_weight: 0.3
+
+journal:
+  path: LAB_JOURNAL.md
+  run_name: elliptic_metric_learning_camo_weighted_mlp_adaptive
