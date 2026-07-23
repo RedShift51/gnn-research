@@ -23,9 +23,18 @@ data:
 # both live and EMA weight-vs-dist_to_legit correlation shot to +0.91 to +0.98 by epoch 25 and
 # stayed there (POSITIVE = up-weighting easy/obvious fraud, the exact predicted degenerate
 # direction). anchor_weight_coeff=0.1 was far too weak relative to the main per_triplet_loss-driven
-# term (same order of magnitude as the loss itself, ~1-4, vs. a squared-weight-difference penalty
-# an order of magnitude smaller). Bumped to 2.0 here -- re-verify the correlation diagnostic
-# BEFORE trusting any recovery number, same as before.
+# term. Bumped to 2.0 to kill the collapse -- confirmed (corr -0.95 to -0.997) -- and a wandb sweep
+# + multi-seed confirmation then found anchor_weight=0.5 + separation_weight=0.3 beats anchor=2.0 by
+# +0.047 mean f1_macro (0.728 vs 0.681) with a much tighter std.
+#
+# CORRECTED AGAIN 2026-07-23 (Run 167): re-checking the collapse diagnostic at THIS looser setting
+# (anchor=0.5) shows it ALSO collapsed (corr +0.80 to +0.99, same wrong direction as anchor=0.1) --
+# the F1 gain is real but is NOT evidence the MLP learned anything useful; it's most likely the
+# separation_weight term doing the work, riding on top of an MLP that's now up-weighting EASY
+# fraud, not camouflaged fraud. This config is kept here as the best-F1 config found so far, but
+# its practical value for the ORIGINAL hard-core-recovery goal is unconfirmed and could plausibly
+# be negative (up-weighting easy examples is the opposite of what hard-core recovery needs) --
+# do not treat this as "camo_weighted_mlp works" without a direct hard-core recovery check.
 model:
   name: graphsage_diff
   hidden_dim: 128
@@ -46,13 +55,12 @@ metric_learning:
   camo_mlp_hidden_dim: 32
   camo_mlp_ema_decay: 0.9
   camo_mlp_warmup_epochs: 40
-  camo_mlp_anchor_weight: 2.0
+  camo_mlp_anchor_weight: 0.5
   camo_mlp_subcentroid_k: 15
   # Explicit push for the fraud/legit centroids to separate further -- the margin-based triplet
   # loss saturates (F.relu(...)=0) once satisfied and stops rewarding extra separation; this has
-  # no such ceiling. Untested weight -- 0.1 is a starting guess (loss magnitudes are roughly the
-  # same order as the triplet loss itself), not a tuned value.
-  separation_weight: 0.1
+  # no such ceiling. 0.3 confirmed best of the swept values (0, 0.1, 0.3) at this anchor_weight.
+  separation_weight: 0.3
 
 journal:
   path: LAB_JOURNAL.md
