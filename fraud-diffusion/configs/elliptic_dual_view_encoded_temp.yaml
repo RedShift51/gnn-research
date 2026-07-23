@@ -1,0 +1,36 @@
+seed: 42
+
+data:
+  dataset: elliptic
+  raw_dir: data/raw/elliptic/elliptic_bitcoin_dataset
+  processed_path: data/processed/elliptic_graph.pt
+  train_end_step: 34
+  val_end_step: 41
+
+# dual_view_encoded (Run 127, confirmed genuine improvement over camo_weighted per Run 142's
+# AUC/matched-ppr checks) + camo_weighted_temp mining (T=0.3, Run 129: no benefit on plain
+# graphsage_diff) -- re-testing the earlier loss variants against the NEW, confirmed-better base
+# architecture instead of the old baseline, per Run 142's Next step.
+model:
+  name: graphsage_dual_view
+  hidden_dim: 128
+  num_layers: 2
+  dropout: 0.5
+  feature_encoder_hidden_dim: 64
+
+train:
+  lr: 0.001
+  weight_decay: 0.00001
+  epochs: 1000
+  patience: 50
+  device: auto
+
+metric_learning:
+  enabled: true
+  margin: 1.0
+  mining: camo_weighted_temp
+  camo_temperature: 0.3
+
+journal:
+  path: LAB_JOURNAL.md
+  run_name: elliptic_dual_view_encoded_temp
