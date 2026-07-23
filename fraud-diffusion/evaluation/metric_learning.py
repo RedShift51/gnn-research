@@ -348,6 +348,49 @@ def _centroid_separation_loss(embeddings: torch.Tensor, fraud_idx: torch.Tensor,
     return -(fraud_centroid - legit_centroid).pow(2).sum(-1)
 
 
+class _SeparationMLP(nn.Module):
+    """Learned projection for _mlp_triplet_separation_loss -- maps an embedding into its own
+    separate 'separation space' instead of operating on the raw embedding directly the way
+    _centroid_separation_loss does. Lets the separation objective use a metric/space specialized
+    for its own goal (pure class separation) rather than reusing the same raw geometry the main
+    triplet loss and camo-weighting are also shaping for THEIR goals -- the three objectives don't
+    have to agree on what 'distance' means in one shared space. Deliberately small, same rationale
+    as _CamoWeightMLP."""
+
+    def __init__(self, in_dim: int, hidden_dim: int = 32, out_dim: int = 32):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(in_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, out_dim),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return F.normalize(self.net(x), dim=-1)
+
+
+def _mlp_triplet_separation_loss(embeddings: torch.Tensor, anchor_idx: torch.Tensor, pos_idx: torch.Tensor,
+                                  neg_idx: torch.Tensor, separation_mlp: "_SeparationMLP") -> torch.Tensor:
+    """Requested reformulation of _centroid_separation_loss in triplet-loss shape: push each
+    anchor away from a negative and pull it toward a positive, same anchor/positive/negative
+    triplet structure as everywhere else in this file, but computed in _SeparationMLP's own
+    learned (unit-normalized) projection space rather than raw embedding distance, and with NO
+    margin/hinge -- `F.relu(d_pos - d_neg + margin)` clips to exactly zero gradient the moment the
+    margin is satisfied, which is precisely the early-saturation behavior _centroid_separation_loss
+    was built to avoid. Dropping the hinge keeps a smooth (shrinking, but never exactly zero until
+    the geometric extreme) gradient all the way to the unit-normalized space's actual maximum
+    separation, instead of stopping the moment an arbitrary fixed margin is cleared. Unlike
+    _centroid_separation_loss (aggregate class centroids only, no learned parameters), this is
+    PER-ANCHOR and its projection is trained jointly -- its own parameters need to join the
+    optimizer in `run()`, same pattern as weight_mlp."""
+    anchor = separation_mlp(embeddings[anchor_idx])
+    pos = separation_mlp(embeddings[pos_idx])
+    neg = separation_mlp(embeddings[neg_idx])
+    d_pos = (anchor - pos).pow(2).sum(-1)
+    d_neg = (anchor - neg).pow(2).sum(-1)
+    return (d_pos - d_neg).mean()
+
+
 def _semi_hard_negatives(anchor_emb: torch.Tensor, pos_emb: torch.Tensor, legit_emb: torch.Tensor) -> torch.Tensor:
     """Semi-hard negative SELECTION (Schroff et al. 2015, FaceNet), pure tensor op -- for each
     (anchor, positive) pair, picks the CLOSEST legit candidate that's still farther than the
@@ -519,7 +562,8 @@ def run(config: dict, n_triplets_per_epoch: int = 2000, margin: float = 1.0,
         gate_aux_weight: float = 0.0, camo_temperature: float = 1.0, margin_scale: float = 1.0,
         camo_mlp_hidden_dim: int = 32, camo_mlp_ema_decay: float = 0.9,
         camo_mlp_warmup_epochs: int = 40, camo_mlp_anchor_weight: float = 0.1,
-        separation_weight: float = 0.0, camo_mlp_subcentroid_k: int = 0) -> dict:
+        separation_weight: float = 0.0, camo_mlp_subcentroid_k: int = 0,
+        mlp_separation_weight: float = 0.0) -> dict:
     wandb_run = init_wandb(config, "metric_learning")
     set_seed(config["seed"])
     device = pick_device(config["train"]["device"])
@@ -554,8 +598,11 @@ def run(config: dict, n_triplets_per_epoch: int = 2000, margin: float = 1.0,
         # (see the training loop, "epoch == camo_mlp_warmup_epochs + 1"), from whatever weight_mlp
         # has actually learned over the warmup epochs. Averaging in the near-random pre-warmup
         # state would just be noise the EMA has to work its way back out of.
+    separation_mlp = _SeparationMLP(config["model"]["hidden_dim"]).to(device) if mlp_separation_weight > 0 else None
     optimizer = torch.optim.Adam(
-        list(model.parameters()) + (list(weight_mlp.parameters()) if weight_mlp is not None else []),
+        list(model.parameters())
+        + (list(weight_mlp.parameters()) if weight_mlp is not None else [])
+        + (list(separation_mlp.parameters()) if separation_mlp is not None else []),
         lr=config["train"]["lr"], weight_decay=config["train"]["weight_decay"],
     )
     triplet_loss_fn = torch.nn.TripletMarginLoss(margin=margin, p=2)
@@ -824,6 +871,16 @@ def run(config: dict, n_triplets_per_epoch: int = 2000, margin: float = 1.0,
             if separation_weight > 0:
                 sep_loss = _centroid_separation_loss(embeddings, train_fraud_idx.to(device), train_legit_idx.to(device))
                 loss = loss + separation_weight * sep_loss
+            if mlp_separation_weight > 0:
+                # Independent triplet sample, NOT whatever anchor_idx/pos_idx/neg_idx the mining
+                # branch above happened to produce -- several mining modes (hard, semi_hard,
+                # multi_prototype, supcon, align_uniform) don't expose index tensors under those
+                # names, so resampling here keeps this term usable with ANY mining mode.
+                mlp_sep_anchor, mlp_sep_pos, mlp_sep_neg = _sample_triplets(
+                    train_fraud_idx, train_legit_idx, n_triplets_per_epoch, generator)
+                mlp_sep_loss = _mlp_triplet_separation_loss(
+                    embeddings, mlp_sep_anchor.to(device), mlp_sep_pos.to(device), mlp_sep_neg.to(device), separation_mlp)
+                loss = loss + mlp_separation_weight * mlp_sep_loss
             if gate_aux_weight > 0 and hasattr(model, "gate_logits"):
                 # Directly supervises GraphSAGEGated's per-edge gate against y_src==y_dst on
                 # known-labeled training edges -- same mechanism as train_gnn.py's

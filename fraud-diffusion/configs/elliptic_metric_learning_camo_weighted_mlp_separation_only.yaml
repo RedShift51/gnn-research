@@ -1,0 +1,40 @@
+seed: 42
+
+data:
+  dataset: elliptic
+  raw_dir: data/raw/elliptic/elliptic_bitcoin_dataset
+  processed_path: data/processed/elliptic_graph.pt
+  train_end_step: 34
+  val_end_step: 41
+
+# Tests _mlp_triplet_separation_loss in isolation: plain camo_weighted mining (hand-designed
+# formula, no learned weighting MLP) + the NEW learned-projection triplet-style separation loss
+# (mlp_separation_weight), instead of _centroid_separation_loss's plain aggregate-centroid push.
+# Requested reformulation: same anchor/positive/negative triplet structure as everywhere else in
+# this file, but computed in a small MLP's own learned (unit-normalized) projection space, with NO
+# margin/hinge -- unlike the main triplet loss's F.relu(...) clipping to exactly zero gradient once
+# satisfied, this keeps a smooth, shrinking-but-nonzero gradient toward the unit-normalized space's
+# actual geometric maximum separation. Directly comparable to
+# elliptic_metric_learning_camo_weighted_separation_only.yaml (same isolation idea, old mechanism).
+model:
+  name: graphsage_diff
+  hidden_dim: 128
+  num_layers: 2
+  dropout: 0.5
+
+train:
+  lr: 0.001
+  weight_decay: 0.00001
+  epochs: 1000
+  patience: 50
+  device: auto
+
+metric_learning:
+  enabled: true
+  margin: 1.0
+  mining: camo_weighted
+  mlp_separation_weight: 0.1
+
+journal:
+  path: LAB_JOURNAL.md
+  run_name: elliptic_metric_learning_camo_weighted_mlp_separation_only
