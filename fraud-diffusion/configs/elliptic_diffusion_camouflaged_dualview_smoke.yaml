@@ -1,0 +1,41 @@
+seed: 42
+data:
+  dataset: elliptic
+  raw_dir: data/raw/elliptic/elliptic_bitcoin_dataset
+  processed_path: data/processed/elliptic_graph.pt
+  augmented_processed_path: data/processed/elliptic_graph_camo_diffusion_augmented.pt
+  train_end_step: 34
+  val_end_step: 41
+diffusion:
+  archetype: camouflaged
+  num_timesteps: 1000
+  hidden_dim: 128
+  lr: 0.001
+  epochs: 20
+  batch_size: 128
+  log_every: 100
+  model_path: models/diffusion/tabddpm_elliptic_camouflaged.pt
+augment:
+  n_synthetic: 1500
+  sampler: ddim
+  ddim_steps: 50
+  attach_to: template
+model:
+  name: graphsage_dual_view
+  hidden_dim: 128
+  num_layers: 2
+  dropout: 0.5
+  feature_encoder_hidden_dim: 64
+train:
+  lr: 0.001
+  weight_decay: 1.0e-05
+  epochs: 20
+  patience: 20
+  device: auto
+metric_learning:
+  enabled: true
+  margin: 1.0
+  mining: camo_weighted_dual
+journal:
+  path: LAB_JOURNAL.md
+  run_name: elliptic_diffusion_camouflaged_dualview_smoke

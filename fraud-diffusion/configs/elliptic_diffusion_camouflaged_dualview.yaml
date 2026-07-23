@@ -1,0 +1,54 @@
+seed: 42
+
+data:
+  dataset: elliptic
+  raw_dir: data/raw/elliptic/elliptic_bitcoin_dataset
+  processed_path: data/processed/elliptic_graph.pt
+  augmented_processed_path: data/processed/elliptic_graph_camo_diffusion_augmented.pt
+  train_end_step: 34
+  val_end_step: 41
+
+# Targeted diffusion augmentation (Run 155): TabDDPM trained ONLY on the camouflaged sub-archetype
+# (Run 81/82's 2-component GMM split on distance-to-legit, smaller-mean component), not all fraud.
+# Generic (unconditional) diffusion augmentation was tested before this archetype was even
+# discovered and found not to stack with other interventions (CLAUDE.md) -- this targets the
+# specific rare, hard-to-classify population directly, a meaningfully different mechanism: more
+# synthetic examples of exactly what the model struggles with, not more of the "obvious" majority.
+diffusion:
+  archetype: camouflaged
+  num_timesteps: 1000
+  hidden_dim: 128
+  lr: 0.001
+  epochs: 1000
+  batch_size: 128
+  log_every: 100
+  model_path: models/diffusion/tabddpm_elliptic_camouflaged.pt
+
+augment:
+  n_synthetic: 1500   # roughly matches/moderately boosts the natural camouflaged population (~40% of 3462 train fraud, Run 81/82)
+  sampler: ddim
+  ddim_steps: 50
+  attach_to: template   # structure-preserving: clones a real fraud node's actual local neighborhood
+
+model:
+  name: graphsage_dual_view
+  hidden_dim: 128
+  num_layers: 2
+  dropout: 0.5
+  feature_encoder_hidden_dim: 64
+
+train:
+  lr: 0.001
+  weight_decay: 0.00001
+  epochs: 1000
+  patience: 50
+  device: auto
+
+metric_learning:
+  enabled: true
+  margin: 1.0
+  mining: camo_weighted_dual
+
+journal:
+  path: LAB_JOURNAL.md
+  run_name: elliptic_diffusion_camouflaged_dualview
