@@ -1,0 +1,39 @@
+seed: 42
+
+data:
+  dataset: elliptic
+  raw_dir: data/raw/elliptic/elliptic_bitcoin_dataset
+  processed_path: data/processed/elliptic_graph.pt
+  train_end_step: 34
+  val_end_step: 41
+
+# Tests _boundary_ranking_loss in isolation: plain camo_weighted mining (no MLP, no centroid/MLP
+# separation loss) + the new boundary-targeted ranking loss. Unlike every other separation/weighting
+# mechanism tried this session (all operate on aggregate centroids or random triplets, dominated by
+# the easy bulk of each class), this specifically targets the K legit TRAIN examples currently
+# scoring closest to fraud -- the ones that would become false positives FIRST as the threshold
+# tightens, i.e. exactly the population that determines recall-at-a-fixed-FPR (Run 162's actual
+# metric) -- and requires every fraud anchor to rank above ALL of them by a margin.
+model:
+  name: graphsage_diff
+  hidden_dim: 128
+  num_layers: 2
+  dropout: 0.5
+
+train:
+  lr: 0.001
+  weight_decay: 0.00001
+  epochs: 1000
+  patience: 50
+  device: auto
+
+metric_learning:
+  enabled: true
+  margin: 1.0
+  mining: camo_weighted
+  boundary_ranking_weight: 0.1
+  boundary_k: 20
+
+journal:
+  path: LAB_JOURNAL.md
+  run_name: elliptic_metric_learning_camo_weighted_boundary_only

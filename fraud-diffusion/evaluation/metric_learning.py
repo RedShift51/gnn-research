@@ -367,6 +367,40 @@ def _centroid_separation_loss(embeddings: torch.Tensor, fraud_idx: torch.Tensor,
     return -(fraud_centroid - legit_centroid).pow(2).sum(-1)
 
 
+def _boundary_ranking_loss(embeddings: torch.Tensor, fraud_idx: torch.Tensor, legit_idx: torch.Tensor,
+                            legit_centroid: torch.Tensor, fraud_centroid: torch.Tensor, k: int,
+                            margin: float = 1.0, n_fraud_sample: int = 500,
+                            generator: torch.Generator = None) -> torch.Tensor:
+    """Targets the DECISION-BOUNDARY region specifically, unlike every other loss in this file --
+    _centroid_separation_loss and _mlp_triplet_separation_loss both operate on aggregate class
+    centroids or random triplets, dominated by the easy bulk of each class; camo_weighted's own
+    formula up-weights by distance-to-legit-CENTROID, which is a different thing from distance to
+    the actual decision boundary. This instead finds the K legit TRAIN examples currently scoring
+    closest to fraud -- i.e. the ones that would become false positives FIRST as the threshold
+    tightens, exactly the population that determines recall-at-a-fixed-FPR (Run 162's actual
+    metric) -- and requires every fraud anchor to rank strictly above ALL of them by `margin`. A
+    pairwise ranking hinge (same family as AUC-maximization / partial-AUC losses), restricted to
+    the hardest negatives at the operating point rather than a random or centroid-based sample.
+    Score function matches _centroid_scores' own sigmoid input (dist_to_legit - dist_to_fraud, so
+    higher = more fraud-like) for consistency with how recovery is actually measured downstream."""
+    legit_emb = embeddings[legit_idx]
+    legit_scores = ((legit_emb - legit_centroid).pow(2).sum(-1).sqrt()
+                     - (legit_emb - fraud_centroid).pow(2).sum(-1).sqrt())
+    k_eff = min(k, len(legit_scores))
+    hard_legit_scores, _ = torch.topk(legit_scores, k=k_eff)
+
+    if n_fraud_sample < len(fraud_idx):
+        sample_idx = fraud_idx[torch.randperm(len(fraud_idx), generator=generator)[:n_fraud_sample]]
+    else:
+        sample_idx = fraud_idx
+    fraud_emb = embeddings[sample_idx]
+    fraud_scores = ((fraud_emb - legit_centroid).pow(2).sum(-1).sqrt()
+                     - (fraud_emb - fraud_centroid).pow(2).sum(-1).sqrt())
+
+    diff = fraud_scores.unsqueeze(1) - hard_legit_scores.unsqueeze(0)  # (n_fraud_sample, k_eff)
+    return F.relu(margin - diff).mean()
+
+
 class _SeparationMLP(nn.Module):
     """Learned projection for _mlp_triplet_separation_loss -- maps an embedding into its own
     separate 'separation space' instead of operating on the raw embedding directly the way
@@ -582,7 +616,8 @@ def run(config: dict, n_triplets_per_epoch: int = 2000, margin: float = 1.0,
         camo_mlp_hidden_dim: int = 32, camo_mlp_ema_decay: float = 0.9,
         camo_mlp_warmup_epochs: int = 40, camo_mlp_anchor_weight: float = 0.1,
         separation_weight: float = 0.0, camo_mlp_subcentroid_k: int = 0,
-        mlp_separation_weight: float = 0.0, camo_mlp_anchor_adaptive: bool = False) -> dict:
+        mlp_separation_weight: float = 0.0, camo_mlp_anchor_adaptive: bool = False,
+        boundary_ranking_weight: float = 0.0, boundary_k: int = 20) -> dict:
     wandb_run = init_wandb(config, "metric_learning")
     set_seed(config["seed"])
     device = pick_device(config["train"]["device"])
@@ -910,6 +945,16 @@ def run(config: dict, n_triplets_per_epoch: int = 2000, margin: float = 1.0,
                 mlp_sep_loss = _mlp_triplet_separation_loss(
                     embeddings, mlp_sep_anchor.to(device), mlp_sep_pos.to(device), mlp_sep_neg.to(device), separation_mlp)
                 loss = loss + mlp_separation_weight * mlp_sep_loss
+            if boundary_ranking_weight > 0:
+                # Fresh centroids from the full train pool, not whatever the mining branch above
+                # happened to compute under a different name -- same independence rationale as
+                # mlp_separation_weight above.
+                legit_centroid_boundary = embeddings[train_legit_idx.to(device)].mean(dim=0)
+                fraud_centroid_boundary = embeddings[train_fraud_idx.to(device)].mean(dim=0)
+                boundary_loss = _boundary_ranking_loss(
+                    embeddings, train_fraud_idx.to(device), train_legit_idx.to(device),
+                    legit_centroid_boundary, fraud_centroid_boundary, k=boundary_k, generator=generator)
+                loss = loss + boundary_ranking_weight * boundary_loss
             if gate_aux_weight > 0 and hasattr(model, "gate_logits"):
                 # Directly supervises GraphSAGEGated's per-edge gate against y_src==y_dst on
                 # known-labeled training edges -- same mechanism as train_gnn.py's

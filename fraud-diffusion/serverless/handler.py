@@ -147,7 +147,9 @@ def handler(job):
                                           separation_weight=mcfg.get("separation_weight", 0.0),
                                           camo_mlp_subcentroid_k=mcfg.get("camo_mlp_subcentroid_k", 0),
                                           mlp_separation_weight=mcfg.get("mlp_separation_weight", 0.0),
-                                          camo_mlp_anchor_adaptive=mcfg.get("camo_mlp_anchor_adaptive", False))
+                                          camo_mlp_anchor_adaptive=mcfg.get("camo_mlp_anchor_adaptive", False),
+                                          boundary_ranking_weight=mcfg.get("boundary_ranking_weight", 0.0),
+                                          boundary_k=mcfg.get("boundary_k", 20))
         elif config.get("gnn_rnn", {}).get("enabled"):
             # GraphSAGEDiff (card1/addr1-sharing edges) + GRU (each transaction's own entity's
             # prior transactions, in time order) -- see evaluation/gnn_rnn_hybrid.py.
